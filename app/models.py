@@ -220,6 +220,9 @@ class ChatMessage(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text)
+    # Assistant only: what the coach proposed to write, as JSON [{id, type, payload, status}],
+    # status pending | done | declined. Nothing is written until the user accepts (app.routers.api).
+    actions: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
@@ -233,6 +236,20 @@ class Review(Base):
     day: Mapped[date_] = mapped_column(Date)  # the user's local date it was made on; covers the 7 days up to it
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class IdempotencyKey(Base):
+    """A client's retry key for a quick write (Idempotency-Key header): a write that already
+    went through isn't applied twice. ref_id: what the first request created (a meal's id)."""
+
+    __tablename__ = "idempotency_keys"
+    __table_args__ = (UniqueConstraint("user_id", "key"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    key: Mapped[str] = mapped_column(String(64))
+    ref_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
 class ApiCall(Base):

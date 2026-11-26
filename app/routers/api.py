@@ -6,23 +6,26 @@ import json
 import re
 import secrets
 import zipfile
-from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
+from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, barcodes, coach, corrections, diary, energy, foods, insights, photos, push, recipes, review as review_mod, usage
+from app import (auth, barcodes, coach, corrections, diary, energy, foods, idempotency, insights, photos, push, recipes,
+                 review as review_mod, usage)
 from app.config import get_settings
 from app.database import get_db
-from app.drafts import build_draft, build_recipe_draft
+from app.drafts import build_draft, build_recipe_draft, draft_item
 from app.images import release_memory, shrink
 from app.models import (Activity, ChatMessage, Food, Invite, Meal, MealItem, Profile, PushSubscription, RecipeItem, Review, User,
                         Water, Weight, utcnow)
-from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize, recognize_recipe
+from app.recognize import RecognizedItem, RecognizeError, RecognizeErrorWithResponse, recognize, recognize_recipe
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -126,11 +129,15 @@ class GoalsIn(BaseModel):
     timezone: str | None = None
 
 
-@router.put("/me")
-def update_me(body: GoalsIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+def _set_goals(user: User, body: GoalsIn) -> None:
     user.kcal_goal, user.protein_goal, user.fat_goal, user.carbs_goal = body.kcal, body.protein, body.fat, body.carbs
     if tz := _valid_tz(body.timezone):
         user.timezone = tz
+
+
+@router.put("/me")
+def update_me(body: GoalsIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    _set_goals(user, body)
     db.commit()
     return _me(db, user)
 
@@ -348,15 +355,55 @@ def _own_meal(db: Session, meal_id: int, user: User) -> Meal:
     return meal
 
 
-@router.post("/meals")
-def add_meal(body: MealIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+def _new_meal(db: Session, user: User, body: MealIn) -> Meal:
+    """A new meal, flushed but not committed: the caller owns the transaction."""
     meal = Meal(user_id=user.id, title=body.title.strip(), eaten_at=_to_utc(body.eaten_at, user.timezone))
     meal.items = [_item(db, i, user) for i in body.items]
     # A photo that is gone (cleaned up overnight) or taken just doesn't attach: the meal still saves.
     if photos.claimable(db, body.photo):
         meal.photo = body.photo
     db.add(meal)
-    db.commit()
+    db.flush()
+    return meal
+
+
+# The quick writes take an optional Idempotency-Key (app.idempotency): a repeat of a key this
+# user already used answers with the current state instead of writing again.
+IdemKey = Header(None, alias="Idempotency-Key")
+
+
+def _commit_keyed(db: Session, key: str | None) -> bool:
+    """Commit the write and its key; False when a parallel request with the same key won."""
+    try:
+        db.commit()
+    except IntegrityError:
+        if key is None:
+            raise
+        db.rollback()
+        return False
+    return True
+
+
+def _meal_replay(db: Session, user: User, key: str) -> dict:
+    done = idempotency.used(db, user, key)
+    meal = db.get(Meal, done.ref_id) if done and done.ref_id else None
+    if meal is None or meal.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Этот приём пищи уже удалён")
+    return _meal_dict(meal, user.timezone)
+
+
+@router.post("/meals")
+def add_meal(body: MealIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db),
+             idempotency_key: str | None = IdemKey):
+    key = idempotency.checked(idempotency_key)
+    if key:
+        idempotency.sweep(db)
+        if idempotency.used(db, user, key):
+            return _meal_replay(db, user, key)
+    meal = _new_meal(db, user, body)
+    idempotency.remember(db, user, key, meal.id)
+    if not _commit_keyed(db, key):
+        return _meal_replay(db, user, key)
     return _meal_dict(meal, user.timezone)
 
 
@@ -646,16 +693,33 @@ class WaterIn(BaseModel):
     delta_ml: int = Field(ge=-1000, le=1000)
 
 
-@router.post("/water")
-def add_water(body: WaterIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
-    d = _today(user)
+def _add_water(db: Session, user: User, d: date, delta_ml: int) -> Water:
     w = db.scalar(select(Water).where(Water.user_id == user.id, Water.day == d))
     if w is None:
         w = Water(user_id=user.id, day=d, ml=0)
         db.add(w)
-    w.ml = max(0, min(10000, (w.ml or 0) + body.delta_ml))
-    db.commit()
-    return _water(db, user, d) or {"ml": w.ml}
+    w.ml = max(0, min(10000, (w.ml or 0) + delta_ml))
+    return w
+
+
+def _water_now(db: Session, user: User, d: date) -> dict:
+    w = db.scalar(select(Water).where(Water.user_id == user.id, Water.day == d))
+    return _water(db, user, d) or {"ml": w.ml if w else 0}
+
+
+@router.post("/water")
+def add_water(body: WaterIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db),
+              idempotency_key: str | None = IdemKey):
+    key = idempotency.checked(idempotency_key)
+    d = _today(user)
+    if key:
+        idempotency.sweep(db)
+        if idempotency.used(db, user, key):
+            return _water_now(db, user, d)
+    _add_water(db, user, d, body.delta_ml)
+    idempotency.remember(db, user, key)
+    _commit_keyed(db, key)
+    return _water_now(db, user, d)
 
 
 @router.get("/insights")
@@ -790,16 +854,19 @@ def _weight_day(user: User, d: date | None) -> date:
 
 
 @router.put("/weight")
-def put_weight(body: WeightIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+def put_weight(body: WeightIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db),
+               idempotency_key: str | None = IdemKey):
+    key = idempotency.checked(idempotency_key)
     d = _weight_day(user, body.day)
+    if key:
+        idempotency.sweep(db)
+    if key is None or not idempotency.used(db, user, key):
+        _upsert_weight(db, user, d, body.kg)
+        idempotency.remember(db, user, key)
+        _commit_keyed(db, key)
     w = db.scalar(select(Weight).where(Weight.user_id == user.id, Weight.day == d))
-    if w is None:
-        w = Weight(user_id=user.id, day=d, kg=body.kg)
-        db.add(w)
-    else:
-        w.kg = body.kg
-    db.commit()
-    return {"date": d.isoformat(), "kg": w.kg}
+    # A replay answers with the day's weight as it is now (gone if deleted since).
+    return {"date": d.isoformat(), "kg": w.kg if w else body.kg}
 
 
 @router.delete("/weight")
@@ -1187,10 +1254,101 @@ def _chat_state(db: Session, user: User) -> dict:
     return {"used_today": coach.used_today(db, user), "per_day": get_settings().coach_daily_messages}
 
 
+# What the coach proposes is checked with the same models and bounds as the regular endpoints,
+# stored on its message, and applied only by POST /coach/actions/... through the same helpers.
+
+_HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+_ITEM_KEYS = ("name", "grams", "food_id", "source", "kcal_100", "protein_100", "fat_100", "carbs_100",
+              "fiber_100", "sugar_100", "salt_100")
+COACH_MIN_KCAL = 1200
+NO_ACTION_REPLY = "Не получилось подготовить запись — напиши подробнее, что именно записать."
+
+
+def _proposal_payload(db: Session, user: User, call: coach.ToolCall) -> dict:
+    """The payload to store, or ValueError/TypeError/KeyError for an unusable call."""
+    raw, today = call.input, _today(user)
+    if call.name == "log_meal":
+        when = str(raw.get("time") or "").strip()
+        if when and not _HHMM.fullmatch(when):
+            raise ValueError(f"time {when!r}")
+        if not isinstance(raw.get("items"), list):
+            raise ValueError("no items")
+        items = []
+        for r in raw["items"][:31]:  # MealIn rejects more than 30
+            # The same matching as a recognized photo: database numbers win over the model's.
+            d = draft_item(db, RecognizedItem.model_validate({**r, "confidence": "medium"}), user.id)
+            items.append(ItemIn.model_validate({k: d[k] for k in _ITEM_KEYS}).model_dump(exclude={"ai_grams"}))
+        meal = MealIn(title=str(raw.get("title") or ""), items=items)
+        return {"title": meal.title.strip(), "time": when or None, "date": today.isoformat(), "items": items}
+    if call.name == "set_goals":
+        goals = GoalsIn.model_validate({k: raw[k] for k in ("kcal", "protein", "fat", "carbs")})
+        if goals.kcal < COACH_MIN_KCAL:
+            raise ValueError(f"kcal {goals.kcal}")
+        return {**goals.model_dump(exclude={"timezone"}), "reason": str(raw.get("reason") or "").strip()[:300],
+                "old": _me(db, user)["goals"]}
+    if call.name == "add_water":
+        water = WaterIn(delta_ml=raw["ml"])
+        if water.delta_ml <= 0:
+            raise ValueError(f"ml {water.delta_ml}")
+        return {"ml": water.delta_ml, "date": today.isoformat()}
+    if call.name == "log_weight":
+        return {"kg": round(WeightIn(kg=raw["kg"]).kg, 1), "date": today.isoformat()}
+    raise ValueError(f"unknown tool {call.name!r}")
+
+
+def _proposals(db: Session, user: User, calls: list[coach.ToolCall]) -> list[dict]:
+    out = []
+    for call in calls:
+        try:
+            payload = _proposal_payload(db, user, call)
+        except (ValueError, TypeError, KeyError) as exc:  # pydantic's ValidationError is a ValueError
+            logger.warning("Coach proposal %s dropped: %s", call.name, str(exc)[:300])
+            continue
+        out.append({"id": secrets.token_urlsafe(6), "type": call.name, "payload": payload, "status": "pending"})
+    return out
+
+
+def _action_summary(a: dict) -> dict:
+    p = a["payload"]
+    if a["type"] == "log_meal":
+        t = _totals([SimpleNamespace(**i) for i in p["items"]])
+        return {"title": p["title"], "time": p["time"], "date": p["date"],
+                "items": [{"name": i["name"], "grams": i["grams"]} for i in p["items"]],
+                "totals": {k: round(t[k]) for k in ("kcal", "protein", "fat", "carbs")}}
+    if a["type"] == "set_goals":
+        return {"old": p["old"], "new": {k: p[k] for k in ("kcal", "protein", "fat", "carbs")}, "reason": p["reason"]}
+    if a["type"] == "add_water":
+        return {"ml": p["ml"], "date": p["date"]}
+    return {"kg": p["kg"], "date": p["date"]}
+
+
+def _msg_dict(m: ChatMessage) -> dict:
+    actions = json.loads(m.actions) if m.actions else []
+    return {"id": m.id, "role": m.role, "text": m.content,
+            "actions": [{"id": a["id"], "type": a["type"], "status": a["status"], "summary": _action_summary(a)}
+                        for a in actions]}
+
+
+def _apply_action(db: Session, user: User, a: dict) -> None:
+    """The proposal written through the regular endpoints' helpers; no commit."""
+    p = a["payload"]
+    if a["type"] == "log_meal":
+        # The proposed time on the day it was proposed; without one, the moment of acceptance.
+        eaten = datetime.combine(date.fromisoformat(p["date"]), time.fromisoformat(p["time"])) if p["time"] else None
+        _new_meal(db, user, MealIn(title=p["title"], eaten_at=eaten, items=[ItemIn(**i) for i in p["items"]]))
+    elif a["type"] == "set_goals":
+        p["old"] = _me(db, user)["goals"]  # what it really replaced, for the card afterwards
+        _set_goals(user, GoalsIn(**{k: p[k] for k in ("kcal", "protein", "fat", "carbs")}))
+    elif a["type"] == "add_water":
+        _add_water(db, user, date.fromisoformat(p["date"]), p["ml"])
+    else:
+        _upsert_weight(db, user, _weight_day(user, date.fromisoformat(p["date"])), p["kg"])
+
+
 @router.get("/coach")
 def coach_chat(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
     msgs = coach.history(db, user, 100)
-    return {"messages": [{"id": m.id, "role": m.role, "text": m.content} for m in msgs], **_chat_state(db, user)}
+    return {"messages": [_msg_dict(m) for m in msgs], **_chat_state(db, user)}
 
 
 class CoachIn(BaseModel):
@@ -1207,20 +1365,55 @@ def coach_say(body: CoachIn, user: User = Depends(auth.current_user), db: Sessio
     if problem := usage.limit_problem(db, user):
         raise HTTPException(status_code=429, detail=problem)
     model = get_settings().coach_model
+    today = _today(user)
+    expenditure = _energy(db, user, today, _daily_rows(db, user, today - timedelta(days=6), today))
     try:
-        reply = coach.ask(db, user, text)
+        reply = coach.ask(db, user, text, extra={"expenditure": expenditure})
     except coach.CoachErrorWithResponse as exc:
         usage.record_call(db, user, exc.response, model=model, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except coach.CoachError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     usage.record_call(db, user, reply.response, model=model)
+    actions = _proposals(db, user, reply.calls)
+    answer_text = reply.text or (coach.NO_TEXT_REPLY if actions else NO_ACTION_REPLY)
     mine = ChatMessage(user_id=user.id, role="user", content=text)
-    answer = ChatMessage(user_id=user.id, role="assistant", content=reply.text)
+    answer = ChatMessage(user_id=user.id, role="assistant", content=answer_text,
+                         actions=json.dumps(actions, ensure_ascii=False) if actions else None)
     db.add_all([mine, answer])
     db.commit()
-    return {"messages": [{"id": m.id, "role": m.role, "text": m.content} for m in (mine, answer)],
+    return {"messages": [_msg_dict(m) for m in (mine, answer)],
             **_chat_state(db, user), "spent_today": round(usage.spent_today(db, user), 4)}
+
+
+class ActionIn(BaseModel):
+    accept: bool
+
+
+@router.post("/coach/actions/{message_id}/{action_id}")
+def coach_action(message_id: int, action_id: str, body: ActionIn,
+                 user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """Accept or decline one proposal. Only a pending one changes, so a repeat never writes twice."""
+    msg = db.get(ChatMessage, message_id)
+    actions = json.loads(msg.actions) if msg is not None and msg.user_id == user.id and msg.actions else []
+    action = next((a for a in actions if a["id"] == action_id), None)
+    if action is None:
+        raise HTTPException(status_code=404, detail="Предложение не найдено")
+    if action["status"] != "pending":
+        return _msg_dict(msg)
+    before = msg.actions
+    if body.accept:
+        _apply_action(db, user, action)
+    action["status"] = "done" if body.accept else "declined"
+    # Compare-and-set in the same transaction as the write: a parallel accept that got
+    # here first leaves no row to update, and this one's write is rolled back.
+    swapped = db.execute(update(ChatMessage).where(ChatMessage.id == msg.id, ChatMessage.actions == before)
+                         .values(actions=json.dumps(actions, ensure_ascii=False))).rowcount
+    if swapped != 1:
+        db.rollback()
+        return _msg_dict(db.get(ChatMessage, message_id))
+    db.commit()
+    return _msg_dict(db.get(ChatMessage, message_id))
 
 
 @router.delete("/coach")

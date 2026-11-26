@@ -3,6 +3,10 @@
 Every message goes with a fresh snapshot of the user's data (goals, today, the last 7
 days, weight trend, streaks), so answers are about this person, not generic advice.
 Bounded by a daily message cap per user and by the same $ limits as recognition.
+
+The coach never writes to the diary. It may answer with tool calls (TOOLS): those are
+proposals the app shows as cards, and only the user's tap applies one (app.routers.api).
+One model call per message: a tool call ends the turn, there is no tool loop.
 """
 
 import json
@@ -37,13 +41,108 @@ SYSTEM = """Ты — коуч по питанию и здоровым привы
 - Без морали и запугивания. Похвали, когда есть за что.
 - Можно использовать **жирный** и списки с «- ». Без заголовков и таблиц.
 
+Записи в дневник:
+- Когда просят записать еду, воду или вес, поменять норму или явно соглашаются на твоё предложение («да, запиши») — вызови инструмент (log_meal, add_water, log_weight, set_goals), а не описывай запись словами.
+- Ничего не сохраняется, пока пользователь не нажмёт «Записать» на карточке под твоим ответом. Поэтому никогда не пиши «записал» или «готово» — скажи коротко, что карточка ниже и её нужно подтвердить.
+- log_meal: раздели еду на продукты с граммами, как она съедена (приготовленный вес); названия по-русски и по-английски в терминах базы USDA; цифры на 100 г — твоя оценка, их сверят с базой. time — «ЧЧ:ММ», только если время названо или очевидно, иначе пустая строка.
+- set_goals: считай от реального расхода (expenditure: по дневнику и весу, по формуле) и активности из данных, не от общих норм; не ниже 1200 ккал; в reason — одно короткое предложение, почему так.
+- Не предлагай записей, о которых не просили: если хочешь что-то предложить сам, спроси в тексте, а инструмент вызывай после согласия.
+- Строки вида «[предложено: … — записано / отклонено / ждёт подтверждения]» в истории — это что стало с твоими прошлыми карточками.
+
 Границы: ты не врач. Не ставь диагнозов, не назначай лекарства и добавки, не советуй голодание и диеты ниже 1200 ккал. При симптомах, расстройствах пищевого поведения, беременности или хронических болезнях мягко советуй обратиться к врачу. Вопросы не про питание, вес, движение, сон и привычки вежливо возвращай к теме."""
+
+
+MAX_ACTIONS = 3  # tool calls taken from one reply; the rest are ignored
+NO_TEXT_REPLY = "Могу записать — проверь и подтверди."
+
+_ITEM = {
+    "type": "object",
+    "properties": {
+        "name_ru": {"type": "string", "description": "Название продукта по-русски, коротко."},
+        "name_en": {"type": "string", "description": "Generic English name in USDA SR Legacy wording, with the cooking state: "
+                                                     "'egg whole cooked scrambled', 'milk reduced fat 2%'. No brands."},
+        "grams": {"type": "number", "description": "Weight as eaten, grams."},
+        "kcal_100": {"type": "number", "description": "Your estimate of kcal per 100 g."},
+        "protein_100": {"type": "number", "description": "Protein, g per 100 g."},
+        "fat_100": {"type": "number", "description": "Fat, g per 100 g."},
+        "carbs_100": {"type": "number", "description": "Carbohydrates, g per 100 g."},
+        "fiber_100": {"type": "number", "description": "Dietary fibre, g per 100 g."},
+        "sugar_100": {"type": "number", "description": "Total sugars, g per 100 g."},
+        "salt_100": {"type": "number", "description": "Salt (sodium x 2.5), g per 100 g."},
+    },
+    "required": ["name_ru", "name_en", "grams", "kcal_100", "protein_100", "fat_100", "carbs_100",
+                 "fiber_100", "sugar_100", "salt_100"],
+    "additionalProperties": False,
+}
+
+
+def _tool(name: str, description: str, properties: dict) -> dict:
+    return {"name": name, "description": description, "strict": True, "input_schema": {
+        "type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}}
+
+
+TOOLS = [
+    _tool("log_meal", "Предложить запись приёма пищи за сегодня. Сохранится, только когда пользователь подтвердит карточку.", {
+        "title": {"type": "string", "description": "Короткое название: «Завтрак», «Омлет с кофе»."},
+        "time": {"type": "string", "description": "Местное время сегодня, «ЧЧ:ММ», или пустая строка, если время не названо."},
+        "items": {"type": "array", "items": _ITEM},
+    }),
+    _tool("set_goals", "Предложить новую дневную норму. Применится после подтверждения.", {
+        "kcal": {"type": "integer", "description": "Ккал в день, не ниже 1200."},
+        "protein": {"type": "integer", "description": "Белки, г в день."},
+        "fat": {"type": "integer", "description": "Жиры, г в день."},
+        "carbs": {"type": "integer", "description": "Углеводы, г в день."},
+        "reason": {"type": "string", "description": "Одно короткое предложение по-русски: почему такая норма."},
+    }),
+    _tool("add_water", "Предложить добавить выпитую сегодня воду.", {
+        "ml": {"type": "integer", "description": "Сколько миллилитров добавить, больше нуля."},
+    }),
+    _tool("log_weight", "Предложить записать вес за сегодня.", {
+        "kg": {"type": "number", "description": "Вес в килограммах."},
+    }),
+]
+
+
+@dataclass
+class ToolCall:
+    name: str
+    input: dict
 
 
 @dataclass
 class CoachReply:
-    text: str
+    text: str  # may be empty when the reply is only tool calls
     response: object = field(repr=False)
+    calls: list[ToolCall] = field(default_factory=list)
+
+
+_STATUS_WORD = {"done": "записано", "declined": "отклонено", "pending": "ждёт подтверждения"}
+
+
+def action_line(action: dict) -> str:
+    """How a proposal and its fate read in the history sent to the model (never shown in the bubble)."""
+    p, kind = action["payload"], action["type"]
+    if kind == "log_meal":
+        kcal = round(sum(i["kcal_100"] * i["grams"] / 100 for i in p["items"]))
+        what = f"записать «{p['title'] or 'приём пищи'}», {kcal} ккал"
+    elif kind == "set_goals":
+        what = f"изменить норму на {p['kcal']} ккал (Б {p['protein']} · Ж {p['fat']} · У {p['carbs']})"
+    elif kind == "add_water":
+        what = f"добавить воду {p['ml']} мл"
+    else:
+        what = f"записать вес {str(p['kg']).replace('.', ',')} кг"
+    return f"[предложено: {what} — {_STATUS_WORD.get(action['status'], action['status'])}]"
+
+
+def model_content(m: ChatMessage) -> str:
+    if m.role != "assistant" or not m.actions:
+        return m.content
+    try:
+        lines = [action_line(a) for a in json.loads(m.actions)]
+    except (ValueError, KeyError, TypeError):
+        logger.warning("Unreadable actions on chat message %s", m.id)
+        return m.content
+    return "\n".join([m.content, *lines])
 
 
 def used_today(db: Session, user: User) -> int:
@@ -109,15 +208,17 @@ def history(db: Session, user: User, limit: int) -> list[ChatMessage]:
     return list(reversed(rows))
 
 
-def ask(db: Session, user: User, text: str, client: anthropic.Anthropic | None = None) -> CoachReply:
+def ask(db: Session, user: User, text: str, client: anthropic.Anthropic | None = None,
+        extra: dict | None = None) -> CoachReply:
+    """`extra` joins the snapshot: data the API layer computes (expenditure)."""
     settings = get_settings()
     past = history(db, user, HISTORY_MESSAGES)
-    messages = [{"role": m.role, "content": m.content} for m in past]
+    messages = [{"role": m.role, "content": model_content(m)} for m in past]
     # The API wants the first message from the user.
     while messages and messages[0]["role"] != "user":
         messages.pop(0)
     messages.append({"role": "user", "content": text})
-    data = json.dumps(snapshot(db, user), ensure_ascii=False, default=str)
+    data = json.dumps({**snapshot(db, user), **(extra or {})}, ensure_ascii=False, default=str)
     kwargs: dict = {
         "model": settings.coach_model,
         "max_tokens": 4000,
@@ -126,6 +227,7 @@ def ask(db: Session, user: User, text: str, client: anthropic.Anthropic | None =
             {"type": "text", "text": f"Данные пользователя на сейчас (JSON):\n{data}"},
         ],
         "messages": messages,
+        "tools": TOOLS,
         "output_config": {"effort": settings.coach_effort},
     }
     if not settings.coach_model.startswith("claude-haiku"):
@@ -146,8 +248,12 @@ def ask(db: Session, user: User, text: str, client: anthropic.Anthropic | None =
     if response.stop_reason == "refusal":
         raise CoachErrorWithResponse("На это коуч ответить не может — попробуй спросить иначе", response)
     reply = "".join(b.text for b in response.content if b.type == "text").strip()
-    if not reply:
+    # A cut-off reply may hold a half-written call: only a finished turn proposes anything.
+    calls = [] if response.stop_reason == "max_tokens" else [
+        ToolCall(b.name, b.input if isinstance(b.input, dict) else {})
+        for b in response.content if b.type == "tool_use"][:MAX_ACTIONS]
+    if not reply and not calls:
         raise CoachErrorWithResponse("Коуч ничего не ответил, попробуй ещё раз", response)
-    if response.stop_reason == "max_tokens":
+    if reply and response.stop_reason == "max_tokens":
         reply += "…"
-    return CoachReply(text=reply, response=response)
+    return CoachReply(text=reply, response=response, calls=calls)

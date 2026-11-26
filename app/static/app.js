@@ -16,12 +16,13 @@ class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-async function api(path, { method = "GET", json, form } = {}) {
-  const opts = { method, headers: {}, credentials: "same-origin" };
+async function api(path, { method = "GET", json, form, headers = {} } = {}) {
+  const opts = { method, headers: { ...headers }, credentials: "same-origin" };
   if (json !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(json); }
   if (form) opts.body = form;
   let res;
-  try { res = await fetch(path, opts); } catch { throw new ApiError(0, "Нет связи с сервером"); }
+  try { res = await fetch(path, opts); } catch { setNetDown(true); throw new ApiError(0, "Нет связи с сервером"); }
+  setNetDown(false);
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
   if (!res.ok) {
     let msg = data?.detail;
@@ -44,6 +45,116 @@ function toast(text, action = null) {
   t.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (t.hidden = true), action ? 6000 : 3500);
+}
+
+// ---------- offline: a queue for the quick writes, the last good day to read from ----------
+// Only water, weight and new meals are queued; recognition, the coach, search and reports need the network.
+
+const QUEUE_MAX = 50;
+const userKey = (kind) => `ft-${kind}:${state.me?.username || ""}`;
+function readStored(kind, fallback) {
+  try { return JSON.parse(localStorage.getItem(userKey(kind)) || "null") ?? fallback; } catch { return fallback; }
+}
+function store(kind, value) {
+  try { localStorage.setItem(userKey(kind), JSON.stringify(value)); return true; } catch { return false; }
+}
+const readQueue = () => readStored("queue", []);
+
+let netDown = false; // the last request failed for lack of a connection
+function setNetDown(v) {
+  if (netDown === v) return;
+  netDown = v;
+  updateNetBanner();
+}
+const isOffline = () => netDown || navigator.onLine === false;
+
+const newKey = () => (crypto.randomUUID ? crypto.randomUUID()
+  : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join(""));
+
+// A write that may wait for the network. Resolves with the server's answer, or with
+// { queued: true } when it went to the queue: the caller then updates the screen itself.
+// HTTP errors are thrown as usual: only a missing connection queues.
+async function quickWrite(path, { method, json, label }) {
+  const entry = { key: newKey(), method, path, json, at: Date.now(), label };
+  if (navigator.onLine !== false) {
+    try {
+      return await api(path, { method, json, headers: { "Idempotency-Key": entry.key } });
+    } catch (err) {
+      if (err.status !== 0) throw err;
+    }
+  }
+  // The request may have reached the server before the connection dropped: the same key makes the retry harmless.
+  const q = readQueue();
+  if (q.length >= QUEUE_MAX) throw new ApiError(0, `Нет сети, а ${QUEUE_MAX} записей уже ждут отправки — дождись связи`);
+  q.push(entry);
+  if (!store("queue", q)) throw new ApiError(0, "Нет сети, и записать в память телефона не вышло");
+  toast("Нет сети — запишу, когда появится");
+  updateNetBanner();
+  return { queued: true };
+}
+
+// Strictly in order, one flush at a time. 2xx and 4xx leave the queue (a 4xx would fail
+// forever); no connection, 5xx and 401 stop and keep everything for the next try.
+let flushing = null;
+function flushQueue() {
+  if (!flushing) flushing = doFlush().finally(() => { flushing = null; });
+  return flushing;
+}
+async function doFlush() {
+  if (!state.me) return;
+  let sent = 0;
+  for (let q = readQueue(); q.length; q = readQueue()) {
+    const e = q[0];
+    let res;
+    try {
+      res = await fetch(e.path, { method: e.method, credentials: "same-origin", body: JSON.stringify(e.json),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": e.key } });
+    } catch { setNetDown(true); break; }
+    setNetDown(false);
+    if (res.status === 401) { renderAuth(); break; }
+    if (res.status >= 500) break;
+    store("queue", readQueue().filter((x) => x.key !== e.key));
+    if (res.ok) sent++; else toast(`Не удалось записать: ${e.label}`);
+  }
+  updateNetBanner();
+  if (!sent) return;
+  if (state.view === "day") loadDay();
+  else if (state.view === "reports") loadStats();
+}
+window.addEventListener("online", () => { updateNetBanner(); flushQueue(); });
+window.addEventListener("offline", updateNetBanner);
+
+// The day as the server last showed it, with what still waits in the queue on top.
+const localNow = () => { const d = new Date(); return `${isoDate(d)}T${d.toTimeString().slice(0, 8)}`; };
+function dayWithQueue(day) {
+  const d = structuredClone(day);
+  for (const e of readQueue()) {
+    const onDay = isoDate(new Date(e.at)) === d.date;
+    if (e.path === "/api/water" && onDay && d.water) {
+      d.water.ml = Math.max(0, Math.min(10000, d.water.ml + e.json.delta_ml));
+    } else if (e.path === "/api/weight" && onDay) {
+      d.weight = d.weight ? { ...d.weight, today: e.json.kg } : { today: e.json.kg, last: { kg: e.json.kg }, trend: e.json.kg, kg_per_week: null };
+    } else if (e.path === "/api/meals" && e.json.eaten_at?.startsWith(d.date)) {
+      const items = e.json.items.map((i) => ({ ...i }));
+      d.meals.push({ id: `q:${e.key}`, queued: true, title: e.json.title, eaten_at: e.json.eaten_at, photo: e.json.photo ?? null, items, totals: totalsOf(items) });
+    }
+  }
+  d.meals.sort((a, b) => new Date(a.eaten_at) - new Date(b.eaten_at));
+  const all = d.meals.flatMap((m) => m.items);
+  const extra = (k) => (all.some((i) => i[`${k}_100`] != null) ? all.reduce((s, i) => s + ((i[`${k}_100`] || 0) * i.grams) / 100, 0) : null);
+  d.totals = { ...totalsOf(all), fiber: extra("fiber"), sugar: extra("sugar"), salt: extra("salt") };
+  return d;
+}
+
+function netBannerHtml() {
+  const n = readQueue().length;
+  if (!isOffline() && !n) return "";
+  const waits = n ? `${n} ${plural(n, "запись", "записи", "записей")} ${n % 10 === 1 && n % 100 !== 11 ? "ждёт" : "ждут"} отправки` : "";
+  return `<div class="net-banner with-ico" role="status">${ICONS.cloudOff}<span>${[isOffline() ? "Нет сети" : "", waits].filter(Boolean).join(" · ")}</span></div>`;
+}
+function updateNetBanner() {
+  const slot = $("#net-slot");
+  if (slot) slot.innerHTML = netBannerHtml();
 }
 
 function openSheet(html) {
@@ -150,6 +261,8 @@ function renderAuth(error = "") {
         ? await api("/api/auth/register", { method: "POST", json: { ...body, invite } })
         : await api("/api/auth/login", { method: "POST", json: body });
       history.replaceState(null, "", "/");
+      try { localStorage.setItem("ft-me", JSON.stringify(state.me)); } catch { /* ignore */ }
+      flushQueue(); // this user's writes queued before a sign-out
       if (!state.me.onboarded) renderOnboarding(1); else await loadDay();
     } catch (err) {
       renderAuth(err.message);
@@ -164,15 +277,23 @@ async function loadDay() {
   showTabs("day");
   showSkeleton("day");
   state.view = "day";
+  const today = isoDate(new Date());
   try {
     const [dayData, streaks] = await Promise.all([api(`/api/day?date=${state.day}`), api("/api/streaks").catch(() => null)]);
-    state.dayData = dayData;
+    if (dayData.date === today) store("day", dayData);
+    state.dayData = dayData.date === today ? dayWithQueue(dayData) : dayData;
     state.streaks = streaks;
     renderDay();
     celebrate(dayData.streaks);
   } catch (err) {
     if (err.status === 401) return renderAuth();
-    app.innerHTML = `<div class="card error">${esc(err.message)}</div>`;
+    const cached = err.status === 0 && state.day === today ? readStored("day", null) : null;
+    if (cached?.date === today) {
+      state.dayData = dayWithQueue(cached);
+      renderDay();
+      return;
+    }
+    app.innerHTML = `<div id="net-slot">${netBannerHtml()}</div><div class="card error">${esc(err.message)}</div>`;
   }
 }
 
@@ -224,6 +345,7 @@ const ICONS = Object.fromEntries(Object.entries({
   mic: '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/>',
   pot: '<path d="M4.5 10h15v6.5a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3z"/><path d="M2.5 10h19M9 6.5c0-1 .8-1.5.8-2.5M14 6.5c0-1 .8-1.5.8-2.5"/>',
   // Parts of the day for meals without a photo, and the observations from /api/insights.
+  cloudOff: '<path d="M7.5 18.5h9.5a3.5 3.5 0 0 0 1-6.86A6 6 0 0 0 7.6 9.1 4.75 4.75 0 0 0 7.5 18.5z"/><path d="M4 4l16 16"/>',
   cup: '<path d="M5 9h11v4.5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16M8.5 3.5v2.5M12 3.5v2.5"/>',
   bowl: '<path d="M4 11h16a8 8 0 0 1-16 0z"/><path d="M9.5 21h5M9 7.5c0-1.5 1-1.5 1-3M13.5 7.5c0-1.5 1-1.5 1-3"/>',
   plate: '<circle cx="12" cy="12" r="4.8"/><path d="M3.5 4v4.5a1.5 1.5 0 0 0 3 0V4M5 4v16M20.5 4c-1.2 1-1.8 3-1.8 5.5h1.8V20"/>',
@@ -331,6 +453,7 @@ function renderDay() {
   showTabs("day");
   openMeal = null;
   app.innerHTML = `
+    <div id="net-slot">${netBannerHtml()}</div>
     ${topbar(sameWeekday ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : label,
       d.toLocaleDateString("ru-RU", sameWeekday ? { weekday: "long" } : { weekday: "long", day: "numeric", month: "long" }),
       `<button class="icon" data-act="prev" aria-label="Предыдущий день">${ICONS.left}</button>
@@ -409,7 +532,9 @@ function streakTile(st) {
 
 async function addWater(delta) {
   try {
-    state.dayData.water = await api("/api/water", { method: "POST", json: { delta_ml: delta } });
+    const r = await quickWrite("/api/water", { method: "POST", json: { delta_ml: delta }, label: `вода ${delta > 0 ? "+" : "−"}${Math.abs(delta)} мл` });
+    const w = state.dayData.water;
+    state.dayData.water = r.queued ? { ...w, ml: Math.max(0, Math.min(10000, w.ml + delta)) } : r;
     const y = window.scrollY;
     renderDay();
     window.scrollTo(0, y);
@@ -462,8 +587,12 @@ function openWeigh() {
     e.preventDefault();
     const kg = Number($("#weigh-kg").value.replace(",", "."));
     if (!(kg >= 20 && kg <= 400)) return toast("Вес — число от 20 до 400 кг");
-    try { await api("/api/weight", { method: "PUT", json: { kg } }); closeSheet(); toast("Вес записан"); loadDay(); }
-    catch (err) { toast(err.message); }
+    try {
+      const r = await quickWrite("/api/weight", { method: "PUT", json: { kg }, label: `вес ${kgFmt(kg)} кг` });
+      closeSheet();
+      if (!r.queued) toast("Вес записан");
+      loadDay();
+    } catch (err) { toast(err.message); }
   };
   $("#weigh-del")?.addEventListener("click", async () => {
     try { await api("/api/weight", { method: "DELETE" }); closeSheet(); loadDay(); } catch (err) { toast(err.message); }
@@ -546,6 +675,17 @@ function mealCard(m) {
   const at = new Date(m.eaten_at);
   const time = at.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   const [, icon, name] = PART_OF_DAY.find(([until]) => at.getHours() < until);
+  // A queued meal isn't on the server yet: nothing to edit or delete until it is.
+  if (m.queued) {
+    return `<div class="meal-wrap"><div class="card meal queued" aria-label="${esc(m.title || name)}, ${r0(m.totals.kcal)} ккал — ждёт сети">
+      <div class="meal-ico">${ICONS[icon]}</div>
+      <div class="grow">
+        <div class="meal-head"><span class="meal-title">${esc(m.title || name)}</span><span class="meal-kcal">${r0(m.totals.kcal)} <small>ккал</small></span></div>
+        <div class="meal-items">${m.items.map((i) => `${esc(i.name)} ${r0(i.grams)} г`).join(" · ")}</div>
+        <div class="meal-meta">${time} · <span class="badge wait">ждёт сети</span></div>
+      </div>
+    </div></div>`;
+  }
   return `<div class="meal-wrap">
     <button class="meal-del" data-meal-del="${m.id}" aria-label="Удалить приём пищи" tabindex="-1">${ICONS.trash}<span>Удалить</span></button>
     <div class="card meal" data-meal="${m.id}" role="button" tabindex="0" aria-label="${esc(m.title || name)}, ${r0(m.totals.kcal)} ккал — изменить">
@@ -929,7 +1069,8 @@ async function saveWeight() {
   const kg = Number($("#weight").value.replace(",", "."));
   if (!(kg >= 20 && kg <= 400)) return toast("Вес — число от 20 до 400 кг");
   try {
-    await api("/api/weight", { method: "PUT", json: { kg } });
+    const r = await quickWrite("/api/weight", { method: "PUT", json: { kg }, label: `вес ${kgFmt(kg)} кг` });
+    if (r.queued) return;
     toast("Вес записан");
     loadStats();
   } catch (err) { toast(err.message); }
@@ -984,7 +1125,8 @@ function openAdd() {
 
 let recentMeals = [];
 async function loadRecent() {
-  try { recentMeals = await api("/api/meals/recent"); } catch { recentMeals = []; }
+  try { recentMeals = await api("/api/meals/recent"); store("recent", recentMeals); }
+  catch (err) { recentMeals = err.status === 0 ? readStored("recent", []) : []; }
   const box = $("#recent");
   if (!box) return;
   if (!recentMeals.length) { box.innerHTML = ""; return; }
@@ -1003,15 +1145,18 @@ async function loadRecent() {
 async function logAgain(m) {
   const body = {
     title: m.title,
+    eaten_at: localNow(), // now, not whenever a queued copy reaches the server
     items: m.items.map((i) => ({ name: i.name, grams: i.grams, food_id: i.food_id ?? null, source: i.source,
       kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100, ...extrasOf(i) })),
   };
+  const label = m.title || m.items[0]?.name || "приём пищи";
   try {
-    const saved = await api("/api/meals", { method: "POST", json: body });
+    const saved = await quickWrite("/api/meals", { method: "POST", json: body, label });
     closeSheet();
     state.day = isoDate(new Date());
     await loadDay();
-    toast(`Записано: ${m.title || m.items[0]?.name || "приём пищи"}`, {
+    if (saved.queued) return;
+    toast(`Записано: ${label}`, {
       label: "Отменить",
       run: async () => { await api(`/api/meals/${saved.id}`, { method: "DELETE" }).catch(() => {}); loadDay(); },
     });
@@ -1299,9 +1444,11 @@ async function saveDraft(btn) {
   // The day the meal belongs to (the viewed day for a new one) at the time in the editor.
   body.eaten_at = `${draft.day}T${draft.time}:00`;
   try {
-    await api(draft.id ? `/api/meals/${draft.id}` : "/api/meals", { method: draft.id ? "PUT" : "POST", json: body });
+    // A new meal may wait for the network; an edit of a saved one needs it.
+    const r = draft.id ? await api(`/api/meals/${draft.id}`, { method: "PUT", json: body })
+      : await quickWrite("/api/meals", { method: "POST", json: body, label: body.title || items[0].name });
     if (!draft.id) { dropStash(); state.day = draft.day; }
-    draft = null; dropLocalPreview(); closeSheet(); toast("Записано"); loadDay();
+    draft = null; dropLocalPreview(); closeSheet(); if (!r?.queued) toast("Записано"); loadDay();
   } catch (err) { btn.disabled = false; toast(err.message); }
 }
 
@@ -1371,7 +1518,8 @@ function dishRow(d, j) {
 }
 
 async function loadDishes() {
-  try { myDishes = await api("/api/recipes"); } catch { myDishes = []; }
+  try { myDishes = await api("/api/recipes"); store("dishes", myDishes); }
+  catch (err) { myDishes = err.status === 0 ? readStored("dishes", []) : []; }
   const box = $("#dishes");
   if (!box || !myDishes.length) return;
   box.innerHTML = `<h3 class="sub">Мои блюда <span class="muted">— тап открывает порцию</span></h3>`
@@ -1384,7 +1532,8 @@ async function openDishList() {
     <div class="row between"><h2>Мои блюда</h2><button class="ghost" id="dishes-back" aria-label="Назад">${ICONS.left}</button></div>
     <div id="dish-list"><div class="skeleton"></div><div class="skeleton"></div></div>
     <button class="primary block with-ico center-ico" id="dish-new" style="margin-top:14px">${ICONS.plus}Новое блюдо</button>`);
-  try { myDishes = await api("/api/recipes"); } catch (err) {
+  try { myDishes = await api("/api/recipes"); store("dishes", myDishes); } catch (err) {
+    if (err.status === 0 && (myDishes = readStored("dishes", [])).length) { const box = $("#dish-list"); if (box) box.innerHTML = myDishes.map(dishRow).join(""); return; }
     const box = $("#dish-list");
     if (box) box.innerHTML = `<div class="error">${esc(err.message)}</div>`;
     return;
@@ -1892,13 +2041,88 @@ function renderProfileList(me, p) {
       <button class="lrow danger" id="logout"><span class="lrow-ico">${ICONS.logout}</span><span class="grow"><span class="lrow-title">Выйти</span></span></button>
     </div>
     <p class="muted small center">Распознавания и ИИ сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</p>`;
-  $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.me = null; renderAuth(); };
+  // The offline queue stays (it is per user and goes out after this user's next sign-in); the device forgets who was here.
+  $("#logout").onclick = async () => {
+    await api("/api/auth/logout", { method: "POST" });
+    try { localStorage.removeItem("ft-me"); } catch { /* ignore */ }
+    state.me = null; renderAuth();
+  };
   $("#replay-onboarding").onclick = () => renderOnboarding(1);
 }
 
 // ---------- coach ----------
 
-const COACH_STARTERS = ["Что съесть на ужин, чтобы добрать белок?", "Оцени мой сегодняшний день", "Почему вес стоит на месте?", "Как мне меньше есть вечером?"];
+const COACH_STARTERS = ["Что съесть на ужин, чтобы добрать белок?", "Оцени мой сегодняшний день", "Запиши: омлет из 3 яиц и кофе с молоком",
+  "Почему вес стоит на месте?", "Как мне меньше есть вечером?"];
+
+// What the coach proposes to write: a card under its reply; nothing is saved until the tap.
+const ACTION_UI = {
+  log_meal: { icon: "plate", title: "Записать приём пищи" },
+  set_goals: { icon: "target", title: "Изменить норму" },
+  add_water: { icon: "drop", title: "Добавить воду" },
+  log_weight: { icon: "scale", title: "Записать вес" },
+};
+
+function actionBody(a) {
+  const s = a.summary;
+  const macros = (t) => `Б ${r0(t.protein)} · Ж ${r0(t.fat)} · У ${r0(t.carbs)}`;
+  if (a.type === "log_meal") {
+    return `<div class="act-sub">${esc(s.title || "Приём пищи")}${s.time ? ` · ${esc(s.time)}` : ""}</div>
+      <ul class="act-items">${s.items.map((i) => `<li><span>${esc(i.name)}</span><span class="muted">${r0(i.grams)} г</span></li>`).join("")}</ul>
+      <div class="act-total"><b>${r0(s.totals.kcal)} ккал</b> · ${macros(s.totals)}</div>`;
+  }
+  if (a.type === "set_goals") {
+    return `<div class="act-total">${r0(s.old.kcal)} → <b>${r0(s.new.kcal)} ккал</b> · ${macros(s.new)}</div>
+      ${s.reason ? `<p class="small muted act-reason">${esc(s.reason)}</p>` : ""}`;
+  }
+  if (a.type === "add_water") return `<div class="act-total"><b>+${r0(s.ml)} мл</b></div>`;
+  return `<div class="act-total"><b>${kgFmt(s.kg)} кг</b></div>`;
+}
+
+function actionCard(m, a) {
+  const ui = ACTION_UI[a.type];
+  if (!ui) return ""; // a type an old cached shell doesn't know
+  const foot = a.status === "pending"
+    ? `<div class="act-btns"><button class="primary grow" data-action-go="1">Записать</button><button class="grow" data-action-go="0">Не надо</button></div>`
+    : a.status === "done"
+      ? `<div class="act-status"><span class="with-ico">${ICONS.check}Записано в дневник</span>
+          <button class="link" data-action-day="${esc(a.summary.date || isoDate(new Date()))}">Открыть день</button></div>`
+      : '<div class="act-status"><span>Отклонено</span></div>';
+  return `<div class="act ${a.status}" data-msg="${m.id}" data-action="${esc(a.id)}">
+    <div class="act-head"><span class="act-ico">${ICONS[ui.icon]}</span><b>${ui.title}</b></div>
+    ${actionBody(a)}${foot}
+  </div>`;
+}
+
+async function decideAction(card, accept) {
+  const msgId = Number(card.dataset.msg), actionId = card.dataset.action;
+  card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  try {
+    const m = await api(`/api/coach/actions/${msgId}/${encodeURIComponent(actionId)}`, { method: "POST", json: { accept } });
+    const list = state.coach?.messages || [];
+    const i = list.findIndex((x) => x.id === msgId);
+    if (i >= 0) list[i] = m;
+    const a = m.actions.find((x) => x.id === actionId);
+    if (a && card.isConnected) card.outerHTML = actionCard(m, a);
+    if (a?.status === "done") {
+      // The diary and the norm changed underneath: the other tabs load fresh, the header numbers too.
+      state.dayData = null; state.stats = null; state.profile = null;
+      api("/api/me").then((me) => (state.me = me)).catch(() => {});
+    }
+  } catch (err) {
+    if (err.status === 401) return renderAuth();
+    card.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    toast(err.message);
+  }
+}
+
+app.addEventListener("click", (e) => {
+  if (state.view !== "coach") return;
+  const go = e.target.closest("[data-action-go]");
+  if (go) return decideAction(go.closest(".act"), go.dataset.actionGo === "1");
+  const day = e.target.closest("[data-action-day]");
+  if (day) { state.day = day.dataset.actionDay; loadDay(); }
+});
 
 // Coach replies use **bold** and "- " lists; everything else is plain text.
 function coachHtml(text) {
@@ -1931,7 +2155,8 @@ function renderCoach(pending = "") {
   stopVoice(true);
   const c = state.coach;
   const left = Math.max(0, c.per_day - c.used_today);
-  const bubbles = c.messages.map((m) => `<div class="bubble ${m.role}">${m.role === "assistant" ? coachHtml(m.text) : `<p>${esc(m.text)}</p>`}</div>`).join("");
+  const bubbles = c.messages.map((m) => `<div class="bubble ${m.role}">${m.role === "assistant" ? coachHtml(m.text) : `<p>${esc(m.text)}</p>`}</div>`
+    + (m.actions || []).map((a) => actionCard(m, a)).join("")).join("");
   app.innerHTML = `
     ${topbar("Коуч", left ? `осталось ${left} ${plural(left, "сообщение", "сообщения", "сообщений")} сегодня` : "сообщения на сегодня закончились",
       c.messages.length ? `<button class="icon" data-act="coach-clear" aria-label="Очистить чат">${ICONS.trash}</button>` : "")}
@@ -2253,7 +2478,18 @@ async function start() {
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
   if (inviteFromUrl()) return renderAuth();
   try {
-    state.me = await api("/api/me");
+    try {
+      state.me = await api("/api/me");
+      try { localStorage.setItem("ft-me", JSON.stringify(state.me)); } catch { /* ignore */ }
+    } catch (err) {
+      // No network: open the diary as last seen, if someone was signed in on this device.
+      let last = null;
+      try { last = JSON.parse(localStorage.getItem("ft-me") || "null"); } catch { /* ignore */ }
+      if (err.status !== 0 || !last) throw err;
+      state.me = last;
+      return await loadDay();
+    }
+    flushQueue();
     if (state.me.timezone !== TZ) api("/api/me", { method: "PUT", json: { ...state.me.goals, timezone: TZ } }).then((m) => (state.me = m)).catch(() => {});
     // A tap on the weekly review notification opens /#reports.
     if (location.hash === "#reports") { history.replaceState(null, "", "/"); await loadStats(); }
@@ -2269,6 +2505,7 @@ async function start() {
 // Coming back to the app on a new day should show the new day.
 let todayAtStart = isoDate(new Date());
 document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") flushQueue();
   if (document.visibilityState !== "visible" || !state.dayData || !sheet.hidden) return;
   const today = isoDate(new Date());
   if (state.day === todayAtStart) state.day = today;

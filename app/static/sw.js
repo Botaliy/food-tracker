@@ -1,8 +1,8 @@
-// Network first for everything: the app is useless offline anyway (recognition
-// and the diary live on the server), but the shell should still open on a bad
-// connection, so the last good copy of the static files is kept.
-const CACHE = "food-shell-v19";
-const SHELL = ["/", "/static/app.js", "/static/style.css", "/manifest.webmanifest", "/static/icons/icon.svg"];
+// Network first for the shell, with the last good copy as the fallback: without a
+// connection the app still opens, shows the diary it saved last and queues quick
+// writes (app.js). The API is never cached here.
+const CACHE = "food-shell-v20";
+const SHELL = ["/", "/static/app.js", "/static/style.css", "/manifest.webmanifest", "/static/icons/icon.svg", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -24,7 +24,9 @@ self.addEventListener("fetch", (e) => {
         if (res.ok) caches.open(CACHE).then((c) => c.put(e.request, res.clone()));
         return res;
       })
-      .catch(() => caches.match(e.request))
+      // ignoreSearch: "/?source=pwa" and the like still open the cached shell.
+      .catch(() => caches.match(e.request, { ignoreSearch: true })
+        .then((hit) => hit || (e.request.mode === "navigate" ? caches.match("/") : Response.error())))
   );
 });
 
