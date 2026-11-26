@@ -145,6 +145,91 @@ def test_cannot_touch_someone_elses_meal(client, db):
     assert client.delete(f"/api/meals/{meal['id']}").status_code == 404
 
 
+# ---------- reports ----------
+
+def _eat(client, when: str, kcal_100: float, grams: float = 100):
+    r = client.post("/api/meals", json={"eaten_at": when, "items": [
+        {"name": "x", "grams": grams, "kcal_100": kcal_100, "protein_100": 10, "fat_100": 0, "carbs_100": 0}]})
+    assert r.status_code == 200, r.text
+
+
+def _local_today():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("Europe/Berlin")).date()
+
+
+def test_stats_group_days_in_user_timezone(client):
+    from datetime import timedelta
+    today = _local_today()
+    d1, d2 = today - timedelta(days=1), today - timedelta(days=3)
+    _eat(client, f"{d1}T08:00:00", 500)
+    _eat(client, f"{d1}T23:30:00", 850, grams=200)  # late evening is still that local day
+    _eat(client, f"{d2}T12:00:00", 750, grams=200)
+
+    s = client.get("/api/stats?days=7").json()
+    assert len(s["days"]) == 7 and s["to"] == today.isoformat()
+    by_date = {d["date"]: d for d in s["days"]}
+    assert by_date[d1.isoformat()]["kcal"] == 2200 and by_date[d1.isoformat()]["meals"] == 2
+    assert by_date[today.isoformat()]["kcal"] == 0
+    assert s["logged_days"] == 2
+    assert s["avg"]["kcal"] == pytest.approx((2200 + 1500) / 2)
+    assert s["in_goal_days"] == 1  # 2200 is over the 2000 goal, 1500 is within
+    assert s["streak"] == 1  # today is empty, so the run ends yesterday
+
+
+def test_streak_counts_today_once_logged(client):
+    from datetime import timedelta
+    today = _local_today()
+    for k in range(3):
+        _eat(client, f"{today - timedelta(days=k)}T12:00:00", 100)
+    _eat(client, f"{today - timedelta(days=5)}T12:00:00", 100)
+    assert client.get("/api/stats?days=7").json()["streak"] == 3
+
+
+def test_weight_is_one_per_day_and_private(client, db):
+    from datetime import timedelta
+    today = _local_today()
+    assert client.put("/api/weight", json={"kg": 80.5}).status_code == 200
+    assert client.put("/api/weight", json={"kg": 80.1}).json() == {"date": today.isoformat(), "kg": 80.1}
+    client.put("/api/weight", json={"kg": 81.0, "date": (today - timedelta(days=10)).isoformat()})
+    assert client.put("/api/weight", json={"kg": 80, "date": (today + timedelta(days=1)).isoformat()}).status_code == 400
+
+    s = client.get("/api/stats?days=7").json()
+    assert s["weights"] == [{"date": today.isoformat(), "kg": 80.1}]
+    assert s["last_weight"]["kg"] == 80.1
+    assert len(client.get("/api/stats?days=30").json()["weights"]) == 2
+
+    assert client.delete("/api/weight").status_code == 200
+    assert client.get("/api/stats?days=7").json()["last_weight"]["kg"] == 81.0
+
+    make_user(db, "boris")
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
+    assert client.get("/api/stats?days=30").json()["last_weight"] is None
+
+
+def test_recent_meals_groups_repeats_by_title_and_products(client, db):
+    def meal(title, *names, grams=100):
+        return client.post("/api/meals", json={"title": title, "items": [
+            {"name": n, "grams": grams, "kcal_100": 100, "protein_100": 0, "fat_100": 0, "carbs_100": 0} for n in names]}).json()
+
+    meal("Завтрак", "Овсянка", "Банан")
+    meal("завтрак ", "Банан", "Овсянка", grams=150)  # same meal: case, spaces and order don't matter
+    meal("Завтрак", "Яйцо")
+    meal("Обед", "Суп")
+
+    recent = client.get("/api/meals/recent").json()
+    assert [(m["title"], m["count"]) for m in recent][0] == ("завтрак", 2)
+    assert recent[0]["items"][0]["grams"] == 150  # the newest copy is the template
+    assert len(recent) == 3
+
+    make_user(db, "boris")
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
+    assert client.get("/api/meals/recent").json() == []
+
+
 # ---------- invites ----------
 
 def test_invite_flow(client):

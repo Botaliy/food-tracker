@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
@@ -11,7 +11,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
 from app.images import release_memory, shrink
-from app.models import Food, Invite, Meal, MealItem, User, utcnow
+from app.models import Food, Invite, Meal, MealItem, User, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
 router = APIRouter(prefix="/api")
@@ -290,6 +290,30 @@ def delete_meal(meal_id: int, user: User = Depends(auth.current_user), db: Sessi
     return {"ok": True}
 
 
+RECENT_DAYS = 30
+
+
+@router.get("/meals/recent")
+def recent_meals(limit: int = Query(8, ge=1, le=20), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """Meals worth repeating: the same title and set of products counts as one, most frequent first."""
+    since = utcnow() - timedelta(days=RECENT_DAYS)
+    meals = db.scalars(
+        select(Meal)
+        .where(Meal.user_id == user.id, Meal.eaten_at >= since)
+        .options(selectinload(Meal.items))
+        .order_by(Meal.eaten_at.desc())
+    ).all()
+    groups: dict[tuple, dict] = {}
+    for m in meals:  # newest first, so the first meal seen is the template
+        key = (m.title.strip().lower(), tuple(sorted(i.name.strip().lower() for i in m.items)))
+        if key in groups:
+            groups[key]["count"] += 1
+        else:
+            groups[key] = {"count": 1, "meal": m}
+    ranked = sorted(groups.values(), key=lambda g: (-g["count"], -g["meal"].eaten_at.timestamp()))
+    return [{**_meal_dict(g["meal"], user.timezone), "count": g["count"]} for g in ranked[:limit]]
+
+
 @router.get("/day")
 def day(date_: date | None = Query(None, alias="date"), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
     start, end = usage.day_bounds_utc(user.timezone, date_)
@@ -307,3 +331,111 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "totals": totals,
         "goals": _me(db, user)["goals"],
     }
+
+
+# ---------- reports ----------
+
+STREAK_LOOKBACK_DAYS = 400
+IN_GOAL_RATIO = 1.05  # same 5% slack as the red "over" bar on the day screen
+
+
+def _today(user: User) -> date:
+    return datetime.now(ZoneInfo(user.timezone)).date()
+
+
+def _local_day(dt: datetime, tz: str) -> date:
+    return dt.replace(tzinfo=UTC).astimezone(ZoneInfo(tz)).date()
+
+
+def _streak(db: Session, user: User, today: date) -> int:
+    """Days in a row with at least one meal, ending today, or yesterday if today is still empty."""
+    since, _ = usage.day_bounds_utc(user.timezone, today - timedelta(days=STREAK_LOOKBACK_DAYS))
+    logged = {
+        _local_day(dt, user.timezone)
+        for dt in db.scalars(select(Meal.eaten_at).where(Meal.user_id == user.id, Meal.eaten_at >= since))
+    }
+    day = today if today in logged else today - timedelta(days=1)
+    n = 0
+    while day in logged:
+        n += 1
+        day -= timedelta(days=1)
+    return n
+
+
+@router.get("/stats")
+def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    today = _today(user)
+    first = today - timedelta(days=days - 1)
+    start, _ = usage.day_bounds_utc(user.timezone, first)
+    _, end = usage.day_bounds_utc(user.timezone, today)
+    meals = db.scalars(
+        select(Meal)
+        .where(Meal.user_id == user.id, Meal.eaten_at >= start, Meal.eaten_at < end)
+        .options(selectinload(Meal.items))
+    ).all()
+
+    by_day: dict[date, list[Meal]] = {}
+    for m in meals:
+        by_day.setdefault(_local_day(m.eaten_at, user.timezone), []).append(m)
+
+    rows = []
+    for k in range(days):
+        d = first + timedelta(days=k)
+        day_meals = by_day.get(d, [])
+        rows.append({"date": d.isoformat(), "meals": len(day_meals), **_totals([i for m in day_meals for i in m.items])})
+
+    logged = [r for r in rows if r["meals"]]
+    avg = {key: round(sum(r[key] for r in logged) / len(logged), 1) if logged else 0.0
+           for key in ("kcal", "protein", "fat", "carbs")}
+    weights = db.scalars(
+        select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= today).order_by(Weight.day)
+    ).all()
+    last_weight = db.scalar(select(Weight).where(Weight.user_id == user.id).order_by(Weight.day.desc()).limit(1))
+    return {
+        "from": first.isoformat(),
+        "to": today.isoformat(),
+        "goals": _me(db, user)["goals"],
+        "days": rows,
+        "avg": avg,
+        "logged_days": len(logged),
+        "in_goal_days": sum(1 for r in logged if r["kcal"] <= user.kcal_goal * IN_GOAL_RATIO),
+        "streak": _streak(db, user, today),
+        "weights": [{"date": w.day.isoformat(), "kg": w.kg} for w in weights],
+        "last_weight": {"date": last_weight.day.isoformat(), "kg": last_weight.kg} if last_weight else None,
+    }
+
+
+class WeightIn(BaseModel):
+    kg: float = Field(ge=20, le=400)
+    day: date | None = Field(None, alias="date")
+
+
+def _weight_day(user: User, d: date | None) -> date:
+    today = _today(user)
+    d = d or today
+    if d > today:
+        raise HTTPException(status_code=400, detail="Нельзя записать вес на будущую дату")
+    return d
+
+
+@router.put("/weight")
+def put_weight(body: WeightIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    d = _weight_day(user, body.day)
+    w = db.scalar(select(Weight).where(Weight.user_id == user.id, Weight.day == d))
+    if w is None:
+        w = Weight(user_id=user.id, day=d, kg=body.kg)
+        db.add(w)
+    else:
+        w.kg = body.kg
+    db.commit()
+    return {"date": d.isoformat(), "kg": w.kg}
+
+
+@router.delete("/weight")
+def delete_weight(date_: date | None = Query(None, alias="date"), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    d = _weight_day(user, date_)
+    w = db.scalar(select(Weight).where(Weight.user_id == user.id, Weight.day == d))
+    if w is not None:
+        db.delete(w)
+        db.commit()
+    return {"ok": True}

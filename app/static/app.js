@@ -84,7 +84,7 @@ async function shrinkPhoto(file, maxEdge = 1280) {
 
 // ---------- state ----------
 
-const state = { me: null, day: isoDate(new Date()), dayData: null };
+const state = { me: null, view: "day", day: isoDate(new Date()), dayData: null, statsDays: 7, stats: null, selected: null };
 
 // ---------- auth ----------
 
@@ -125,6 +125,7 @@ function renderAuth(error = "") {
 // ---------- day view ----------
 
 async function loadDay() {
+  state.view = "day";
   try {
     state.dayData = await api(`/api/day?date=${state.day}`);
     renderDay();
@@ -149,6 +150,7 @@ function renderDay() {
       <h1>${esc(dayLabel(state.day))}</h1>
       <div class="row">
         <button class="ghost" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>›</button>
+        <button class="ghost" data-act="reports" aria-label="Отчёты">📊</button>
         <button class="ghost" data-act="settings" aria-label="Настройки">⚙︎</button>
       </div>
     </div>
@@ -184,6 +186,22 @@ app.addEventListener("click", (e) => {
     d.setDate(d.getDate() + (act === "prev" ? -1 : 1));
     state.day = isoDate(d);
     loadDay();
+  } else if (act === "reports") {
+    loadStats();
+  } else if (act === "back") {
+    loadDay();
+  } else if (act === "period") {
+    state.statsDays = Number(e.target.closest("[data-days]").dataset.days);
+    state.selected = null;
+    loadStats();
+  } else if (act === "bar") {
+    state.selected = e.target.closest("[data-date]").dataset.date;
+    renderStats();
+  } else if (act === "open-day") {
+    state.day = state.selected;
+    loadDay();
+  } else if (act === "save-weight") {
+    saveWeight();
   } else if (act === "add") {
     openAdd();
   } else if (act === "settings") {
@@ -193,6 +211,128 @@ app.addEventListener("click", (e) => {
     if (meal) openEditor({ id: meal.id, title: meal.title, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
   }
 });
+
+// ---------- reports ----------
+
+const PERIODS = [[7, "Неделя"], [30, "Месяц"], [90, "3 месяца"]];
+const shortDate = (iso) => new Date(iso + "T12:00").toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+const plural = (n, one, few, many) => {
+  const m10 = n % 10, m100 = n % 100;
+  return m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14) ? few : many;
+};
+
+async function loadStats() {
+  state.view = "reports";
+  try {
+    state.stats = await api(`/api/stats?days=${state.statsDays}`);
+    renderStats();
+  } catch (err) {
+    if (err.status === 401) return renderAuth();
+    app.innerHTML = `<div class="card error">${esc(err.message)}</div>`;
+  }
+}
+
+function kcalChart(s) {
+  const W = 320, H = 150, top = 8, bottom = 18, n = s.days.length;
+  const goal = s.goals.kcal;
+  const max = Math.max(goal * 1.15, ...s.days.map((d) => d.kcal));
+  const y = (v) => top + (H - top - bottom) * (1 - v / max);
+  const slot = W / n, gap = n > 40 ? 1 : 2, bw = Math.min(28, Math.max(1, slot - gap));
+  const rx = Math.min(4, bw / 2);
+  const bars = s.days.map((d, i) => {
+    const x = i * slot + (slot - bw) / 2;
+    const over = d.kcal > goal * 1.05;
+    const sel = d.date === state.selected;
+    const h = d.kcal > 0 ? Math.max(2, H - bottom - y(d.kcal)) : 0;
+    // Rounded top, square base: a rounded rect plus a square patch over its bottom corners.
+    const mark = h ? `<rect x="${x}" y="${H - bottom - h}" width="${bw}" height="${h}" rx="${rx}" class="${over ? "over" : ""}"/>
+      <rect x="${x}" y="${H - bottom - Math.min(h, rx)}" width="${bw}" height="${Math.min(h, rx)}" class="${over ? "over" : ""}"/>` : "";
+    return `<g class="b ${sel ? "sel" : ""}" data-act="bar" data-date="${d.date}">
+      <rect class="hit" x="${i * slot}" y="0" width="${slot}" height="${H}"/>${mark}</g>`;
+  }).join("");
+  const ticks = [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i)
+    .map((i) => `<text x="${(i + 0.5) * slot}" y="${H - 4}" text-anchor="${i === 0 ? "start" : i === n - 1 ? "end" : "middle"}">${esc(shortDate(s.days[i].date))}</text>`).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Калории по дням">
+    <line class="base" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}"/>
+    ${bars}
+    <line class="goal" x1="0" x2="${W}" y1="${y(goal)}" y2="${y(goal)}"/>
+    <text class="goal-label" x="${W}" y="${y(goal) - 4}" text-anchor="end">норма ${goal}</text>
+    ${ticks}
+  </svg>`;
+}
+
+function weightChart(s) {
+  const pts = s.weights;
+  if (pts.length < 2) return `<p class="muted small">${pts.length ? "Ещё одно взвешивание — и появится график." : "За этот период взвешиваний нет."}</p>`;
+  const W = 320, H = 120, top = 10, bottom = 18, left = 4, right = 4;
+  const t0 = new Date(s.from + "T12:00").getTime(), t1 = new Date(s.to + "T12:00").getTime();
+  const kgs = pts.map((p) => p.kg);
+  const lo = Math.floor(Math.min(...kgs) - 0.5), hi = Math.ceil(Math.max(...kgs) + 0.5);
+  const x = (iso) => left + (W - left - right) * (t1 === t0 ? 0.5 : (new Date(iso + "T12:00").getTime() - t0) / (t1 - t0));
+  const y = (kg) => top + (H - top - bottom) * (1 - (kg - lo) / (hi - lo));
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.date).toFixed(1)},${y(p.kg).toFixed(1)}`).join(" ");
+  const dots = pts.map((p) => `<circle cx="${x(p.date)}" cy="${y(p.kg)}" r="${pts.length > 40 ? 2 : 4}"><title>${esc(shortDate(p.date))}: ${p.kg} кг</title></circle>`).join("");
+  return `<svg class="chart weight" viewBox="0 0 ${W} ${H}" role="img" aria-label="Вес по дням">
+    <line class="grid" x1="0" x2="${W}" y1="${y(hi)}" y2="${y(hi)}"/><line class="grid" x1="0" x2="${W}" y1="${y(lo)}" y2="${y(lo)}"/>
+    <text x="${W}" y="${y(hi) + 12}" text-anchor="end">${hi} кг</text><text x="${W}" y="${y(lo) - 4}" text-anchor="end">${lo} кг</text>
+    <path d="${path}"/>${dots}
+    <text x="0" y="${H - 4}">${esc(shortDate(s.from))}</text><text x="${W}" y="${H - 4}" text-anchor="end">${esc(shortDate(s.to))}</text>
+  </svg>`;
+}
+
+function renderStats() {
+  const s = state.stats;
+  const g = s.goals, a = s.avg;
+  const sel = s.days.find((d) => d.date === state.selected);
+  const todayW = s.weights.find((w) => w.date === s.to);
+  const delta = s.weights.length >= 2 ? r1(s.weights.at(-1).kg - s.weights[0].kg) : null;
+  app.innerHTML = `
+    <div class="daynav">
+      <button class="ghost" data-act="back" aria-label="Назад">‹</button>
+      <h1>Отчёты</h1>
+      <button class="ghost" data-act="settings" aria-label="Настройки">⚙︎</button>
+    </div>
+    <div class="seg">${PERIODS.map(([d, l]) => `<button data-act="period" data-days="${d}" class="${d === state.statsDays ? "on" : ""}">${l}</button>`).join("")}</div>
+    <div class="tiles">
+      <div class="tile"><span class="muted small">Серия</span><b>${s.streak}</b><span class="muted small">${plural(s.streak, "день", "дня", "дней")} подряд</span></div>
+      <div class="tile"><span class="muted small">В норме</span><b>${s.in_goal_days}<small> / ${s.logged_days}</small></b><span class="muted small">дней с записями</span></div>
+      <div class="tile"><span class="muted small">В среднем</span><b>${r0(a.kcal)}</b><span class="muted small">ккал/день</span></div>
+    </div>
+    <div class="card">
+      <div class="row between"><b>Калории</b><span class="muted small">${s.logged_days ? `среднее ${r0(a.kcal)} из ${g.kcal}` : "нет записей"}</span></div>
+      ${kcalChart(s)}
+      <div class="sel-info small">${sel
+        ? `<span><b>${esc(dayLabel(sel.date))}</b>: ${r0(sel.kcal)} ккал · Б ${r0(sel.protein)} Ж ${r0(sel.fat)} У ${r0(sel.carbs)}</span><button class="ghost" data-act="open-day">Открыть ›</button>`
+        : '<span class="muted">Нажми на столбик, чтобы увидеть день</span>'}</div>
+    </div>
+    <div class="card">
+      <b>БЖУ в среднем за день</b>
+      <div class="macros">
+        ${[["Белки", a.protein, g.protein, "var(--protein)"], ["Жиры", a.fat, g.fat, "var(--fat)"], ["Углеводы", a.carbs, g.carbs, "var(--carbs)"]]
+          .map(([n, v, goal, c]) => `<div class="macro"><span class="muted small">${n}</span><b>${r0(v)} / ${goal} г</b>${bar(v, goal, c)}</div>`).join("")}
+      </div>
+      <p class="muted small" style="margin:10px 0 0">Среднее считается только по дням, где есть записи.</p>
+    </div>
+    <div class="card">
+      <div class="row between"><b>Вес</b><span class="muted small">${delta === null ? (s.last_weight ? `последний: ${s.last_weight.kg} кг, ${esc(shortDate(s.last_weight.date))}` : "") : `${delta > 0 ? "+" : ""}${delta} кг за период`}</span></div>
+      ${weightChart(s)}
+      <form class="row" id="weight-form" style="margin-top:10px">
+        <input id="weight" type="number" step="0.1" min="20" max="400" inputmode="decimal" placeholder="Вес сегодня, кг" value="${todayW ? todayW.kg : ""}">
+        <button class="primary" data-act="save-weight" type="button">${todayW ? "Обновить" : "Записать"}</button>
+      </form>
+    </div>`;
+  $("#weight-form").onsubmit = (e) => { e.preventDefault(); saveWeight(); };
+}
+
+async function saveWeight() {
+  const kg = Number($("#weight").value.replace(",", "."));
+  if (!(kg >= 20 && kg <= 400)) return toast("Вес — число от 20 до 400 кг");
+  try {
+    await api("/api/weight", { method: "PUT", json: { kg } });
+    toast("Вес записан");
+    loadStats();
+  } catch (err) { toast(err.message); }
+}
 
 // ---------- add: photo / note -> draft ----------
 
@@ -212,9 +352,29 @@ function openAdd() {
     <div class="error" id="add-error"></div>
     <button class="primary block" id="recognize" style="margin-top:12px">Посчитать</button>
     <button class="block" id="manual" style="margin-top:8px">Ввести вручную</button>
+    <div id="recent"></div>
     <p class="muted small center" id="spent"></p>`);
   const me = state.me;
   if (me) $("#spent").textContent = `Потрачено сегодня $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}`;
+  loadRecent();
+}
+
+let recentMeals = [];
+async function loadRecent() {
+  try { recentMeals = await api("/api/meals/recent"); } catch { return; }
+  const box = $("#recent");
+  if (!box || !recentMeals.length) return;
+  box.innerHTML = `<h3 class="sub">Часто ешь</h3>` + recentMeals.map((m, j) => `
+    <button class="recent" data-recent="${j}">
+      <span class="grow"><b>${esc(m.title || m.items.map((i) => i.name).join(", "))}</b>
+        <span class="small muted">${m.title ? esc(m.items.map((i) => `${i.name} ${r0(i.grams)} г`).join(" · ")) : ""}</span></span>
+      <span class="small"><b>${r0(m.totals.kcal)}</b> ккал${m.count > 1 ? `<br><span class="muted">×${m.count}</span>` : ""}</span>
+    </button>`).join("");
+}
+
+// A copy of an existing meal as a new, unsaved one eaten now.
+function repeatMeal(m) {
+  openEditor({ title: m.title, items: m.items.map(({ id, ...i }) => ({ ...i, options: [] })), comment: "", today: true });
 }
 
 sheetBody.addEventListener("change", async (e) => {
@@ -230,6 +390,8 @@ sheetBody.addEventListener("change", async (e) => {
 sheetBody.addEventListener("click", async (e) => {
   if (e.target.closest("[data-close]")) return closeSheet();
   if (e.target.id === "manual") return openEditor({ title: "", items: [], comment: "" });
+  const rec = e.target.closest("[data-recent]");
+  if (rec) return repeatMeal(recentMeals[Number(rec.dataset.recent)]);
   if (e.target.id !== "recognize") return;
 
   const note = $("#note").value.trim();
@@ -313,7 +475,7 @@ function renderEditor() {
     <div class="totals">
       <div class="row between"><b id="draft-total"></b><span class="small muted" id="draft-macros"></span></div>
       <button class="primary block" id="save" style="margin-top:8px">${draft.id ? "Сохранить" : "Съел — записать"}</button>
-      ${draft.id ? '<button class="block danger" id="delete" style="margin-top:8px">Удалить приём пищи</button>' : ""}
+      ${draft.id ? '<button class="block" id="repeat" style="margin-top:8px">Записать ещё раз сегодня</button><button class="block danger" id="delete" style="margin-top:8px">Удалить приём пищи</button>' : ""}
     </div>`);
   updateDraftTotals();
 }
@@ -381,6 +543,8 @@ sheetBody.addEventListener("click", async (e) => {
     openCustomFood($("#food-q").value.trim());
   } else if (t.id === "save") {
     saveDraft(t);
+  } else if (t.id === "repeat") {
+    repeatMeal(draft);
   } else if (t.id === "delete") {
     if (!confirm("Удалить этот приём пищи?")) return;
     try {
@@ -402,9 +566,12 @@ async function saveDraft(btn) {
     })),
   };
   // A new meal lands on the day being viewed: "now" for today, midday for a past day.
-  if (!draft.id && state.day !== isoDate(new Date())) body.eaten_at = `${state.day}T12:00:00`;
+  // A repeated meal is always eaten now.
+  if (!draft.id && !draft.today && state.day !== isoDate(new Date())) body.eaten_at = `${state.day}T12:00:00`;
+  const toToday = !draft.id && draft.today;
   try {
     await api(draft.id ? `/api/meals/${draft.id}` : "/api/meals", { method: draft.id ? "PUT" : "POST", json: body });
+    if (toToday) state.day = isoDate(new Date());
     draft = null; closeSheet(); toast("Записано"); loadDay();
   } catch (err) { btn.disabled = false; toast(err.message); }
 }
@@ -462,7 +629,7 @@ async function openSettings() {
     const f = Object.fromEntries(new FormData(e.target));
     try {
       state.me = await api("/api/me", { method: "PUT", json: { kcal: +f.kcal, protein: +f.protein, fat: +f.fat, carbs: +f.carbs, timezone: TZ } });
-      closeSheet(); toast("Сохранено"); loadDay();
+      closeSheet(); toast("Сохранено"); state.view === "reports" ? loadStats() : loadDay();
     } catch (err) { toast(err.message); }
   };
   $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.me = null; closeSheet(); renderAuth(); };
@@ -518,7 +685,7 @@ document.addEventListener("visibilitychange", () => {
   const today = isoDate(new Date());
   if (state.day === todayAtStart) state.day = today;
   todayAtStart = today;
-  loadDay();
+  if (state.view === "reports") loadStats(); else loadDay();
 });
 
 start();

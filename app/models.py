@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
+from datetime import date as date_
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -87,6 +88,18 @@ class MealItem(Base):
     carbs_100: Mapped[float] = mapped_column(Float)
 
     meal: Mapped[Meal] = relationship(back_populates="items")
+
+
+class Weight(Base):
+    """One weigh-in per user per local calendar day; a second entry for the day replaces the first."""
+
+    __tablename__ = "weights"
+    __table_args__ = (UniqueConstraint("user_id", "day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date_] = mapped_column(Date)
+    kg: Mapped[float] = mapped_column(Float)
 
 
 class ApiCall(Base):
