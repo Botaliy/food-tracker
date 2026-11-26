@@ -764,3 +764,47 @@ def test_water_glasses_and_switch(client):
     assert client.post("/api/water", json={"delta_ml": -1000}).json()["ml"] == 0
     client.put("/api/profile/water", json={"track_water": False, "water_goal_ml": 2500})
     assert client.get("/api/day").json()["water"] is None
+
+
+@pytest.fixture
+def fake_coach(monkeypatch):
+    from app import coach
+    fake = FakeClient(fake_response("**Творог 200 г** и банан — добьёшь белок.\n- вариант 1\n- вариант 2"))
+    monkeypatch.setattr(coach, "_client", lambda: fake)
+    return fake
+
+
+def test_coach_answers_with_diary_snapshot(client, fake_coach):
+    _eat(client, f"{_local_today()}T09:00:00", 300, grams=200)
+    client.put("/api/weight", json={"kg": 70})
+    r = client.post("/api/coach", json={"text": "Что съесть на ужин?"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant"] and body["used_today"] == 1
+    assert body["messages"][1]["text"].startswith("**Творог")
+
+    kw = fake_coach.kwargs
+    assert kw["messages"] == [{"role": "user", "content": "Что съесть на ужин?"}]
+    data = json.loads(kw["system"][1]["text"].split("\n", 1)[1])
+    assert data["today"]["eaten"]["kcal"] == 600 and data["today"]["left"]["kcal"] == 1400
+    assert data["weight"]["last"]["kg"] == 70 and len(data["last_7_days"]["days"]) == 7
+
+    # The second message carries the conversation so far.
+    client.post("/api/coach", json={"text": "А если без молочного?"})
+    assert [m["role"] for m in fake_coach.kwargs["messages"]] == ["user", "assistant", "user"]
+    assert len(client.get("/api/coach").json()["messages"]) == 4
+    client.delete("/api/coach")
+    assert client.get("/api/coach").json()["messages"] == []
+
+
+def test_coach_daily_cap_and_spend_limit(client, db, fake_coach, monkeypatch):
+    from app.config import get_settings
+    monkeypatch.setattr(get_settings(), "coach_daily_messages", 1)
+    monkeypatch.setattr(get_settings(), "default_daily_limit_usd", 10.0)
+    assert client.post("/api/coach", json={"text": "привет"}).status_code == 200
+    r = client.post("/api/coach", json={"text": "ещё"})
+    assert r.status_code == 429 and "закончились" in r.json()["detail"]
+    monkeypatch.setattr(get_settings(), "coach_daily_messages", 5)
+    monkeypatch.setattr(get_settings(), "default_daily_limit_usd", 0.0001)
+    assert client.post("/api/coach", json={"text": "ещё"}).status_code == 429
+    assert db.query(ApiCall).count() == 1

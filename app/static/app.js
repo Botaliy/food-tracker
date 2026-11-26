@@ -424,6 +424,9 @@ app.addEventListener("click", (e) => {
   } else if (act === "open-day") {
     state.day = state.selected;
     loadDay();
+  } else if (act === "coach-clear") {
+    if (!confirm("Очистить переписку с коучем?")) return;
+    api("/api/coach", { method: "DELETE" }).then(() => loadCoach()).catch((err) => toast(err.message));
   } else if (act === "weigh") {
     openWeigh();
   } else if (act === "water-add") {
@@ -1158,10 +1161,76 @@ async function loadProfileView() {
 
 // ---------- coach ----------
 
-function loadCoach() {
+const COACH_STARTERS = ["Что съесть на ужин, чтобы добрать белок?", "Оцени мой сегодняшний день", "Почему вес стоит на месте?", "Как мне меньше есть вечером?"];
+
+// Coach replies use **bold** and "- " lists; everything else is plain text.
+function coachHtml(text) {
+  const lines = esc(text).split("\n");
+  let html = "", inList = false;
+  for (const raw of lines) {
+    const line = raw.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+    const item = line.match(/^\s*[-•]\s+(.*)/);
+    if (item) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${item[1]}</li>`; continue; }
+    if (inList) { html += "</ul>"; inList = false; }
+    if (line.trim()) html += `<p>${line}</p>`;
+  }
+  return html + (inList ? "</ul>" : "");
+}
+
+async function loadCoach() {
   state.view = "coach";
   showTabs("coach");
-  app.innerHTML = `${topbar("Коуч", "чат о питании и привычках", "")}<div class="empty"><div class="empty-ico">💬</div><b>Скоро</b></div>`;
+  app.innerHTML = `${topbar("Коуч", "чат о питании и привычках", "")}<div class="spinner"></div>`;
+  try { state.coach = await api("/api/coach"); } catch (err) {
+    if (err.status === 401) return renderAuth();
+    app.innerHTML += `<div class="error">${esc(err.message)}</div>`;
+    return;
+  }
+  renderCoach();
+}
+
+function renderCoach(pending = "") {
+  const c = state.coach;
+  const left = Math.max(0, c.per_day - c.used_today);
+  const bubbles = c.messages.map((m) => `<div class="bubble ${m.role}">${m.role === "assistant" ? coachHtml(m.text) : `<p>${esc(m.text)}</p>`}</div>`).join("");
+  app.innerHTML = `
+    ${topbar("Коуч", left ? `осталось ${left} ${plural(left, "сообщение", "сообщения", "сообщений")} сегодня` : "сообщения на сегодня закончились",
+      c.messages.length ? '<button class="icon" data-act="coach-clear" aria-label="Очистить чат">🗑️</button>' : "")}
+    <div class="chat" id="chat">
+      ${c.messages.length ? bubbles : `<div class="empty"><div class="empty-ico">💬</div><b>Спроси что угодно о питании</b>
+        <p>Коуч видит твой дневник: норму, что съедено сегодня, неделю, вес и серии.</p></div>
+        <div class="starters">${COACH_STARTERS.map((q, j) => `<button class="chip" data-starter="${j}">${esc(q)}</button>`).join("")}</div>`}
+      ${pending ? `<div class="bubble user"><p>${esc(pending)}</p></div><div class="bubble assistant typing"><i></i><i></i><i></i></div>` : ""}
+    </div>
+    <form class="composer" id="coach-form">
+      <textarea id="coach-text" rows="1" placeholder="${left ? "Напиши коучу…" : "Продолжим завтра"}" ${left && !pending ? "" : "disabled"} maxlength="2000"></textarea>
+      <button class="primary" ${left && !pending ? "" : "disabled"} aria-label="Отправить">↑</button>
+    </form>
+    <div id="coach-error" class="error"></div>`;
+  window.scrollTo(0, document.body.scrollHeight);
+  const ta = $("#coach-text");
+  ta.oninput = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; };
+  ta.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(hover: hover)").matches) { e.preventDefault(); $("#coach-form").requestSubmit(); } };
+  $("#coach-form").onsubmit = (e) => { e.preventDefault(); sendCoach(ta.value); };
+  app.querySelectorAll("[data-starter]").forEach((b) => b.addEventListener("click", () => sendCoach(COACH_STARTERS[Number(b.dataset.starter)])));
+}
+
+async function sendCoach(text) {
+  text = text.trim();
+  if (!text) return;
+  renderCoach(text);
+  try {
+    const r = await api("/api/coach", { method: "POST", json: { text } });
+    state.coach.messages.push(...r.messages);
+    state.coach.used_today = r.used_today;
+    if (state.me) state.me.spent_today = r.spent_today;
+    if (state.view === "coach") renderCoach();
+  } catch (err) {
+    if (state.view !== "coach") return toast(err.message);
+    renderCoach();
+    $("#coach-text").value = text;
+    $("#coach-error").textContent = err.message;
+  }
 }
 
 // ---------- first run: goal, Home Screen, reminders ----------

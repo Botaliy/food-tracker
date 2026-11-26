@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, barcodes, corrections, diary, energy, foods, insights, push, review as review_mod, usage
+from app import auth, barcodes, coach, corrections, diary, energy, foods, insights, push, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
 from app.images import release_memory, shrink
-from app.models import Activity, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Water, Weight, utcnow
+from app.models import Activity, ChatMessage, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Water, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
 logger = logging.getLogger(__name__)
@@ -839,3 +839,52 @@ def streaks(user: User = Depends(auth.current_user), db: Session = Depends(get_d
         people.append({"name": u.username, "streak": n, "today": today_logged, "me": u.id == user.id})
     people.sort(key=lambda p: (-p["streak"], not p["me"], p["name"]))
     return {"joined": True, "people": people}
+
+
+# ---------- coach chat ----------
+
+def _chat_state(db: Session, user: User) -> dict:
+    return {"used_today": coach.used_today(db, user), "per_day": get_settings().coach_daily_messages}
+
+
+@router.get("/coach")
+def coach_chat(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    msgs = coach.history(db, user, 100)
+    return {"messages": [{"id": m.id, "role": m.role, "text": m.content} for m in msgs], **_chat_state(db, user)}
+
+
+class CoachIn(BaseModel):
+    text: str = Field(min_length=1, max_length=coach.MAX_MESSAGE_CHARS)
+
+
+@router.post("/coach")
+def coach_say(body: CoachIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+    if coach.used_today(db, user) >= get_settings().coach_daily_messages:
+        raise HTTPException(status_code=429, detail="На сегодня сообщения коучу закончились — продолжим завтра")
+    if problem := usage.limit_problem(db, user):
+        raise HTTPException(status_code=429, detail=problem)
+    model = get_settings().coach_model
+    try:
+        reply = coach.ask(db, user, text)
+    except coach.CoachErrorWithResponse as exc:
+        usage.record_call(db, user, exc.response, model=model, error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except coach.CoachError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    usage.record_call(db, user, reply.response, model=model)
+    mine = ChatMessage(user_id=user.id, role="user", content=text)
+    answer = ChatMessage(user_id=user.id, role="assistant", content=reply.text)
+    db.add_all([mine, answer])
+    db.commit()
+    return {"messages": [{"id": m.id, "role": m.role, "text": m.content} for m in (mine, answer)],
+            **_chat_state(db, user), "spent_today": round(usage.spent_today(db, user), 4)}
+
+
+@router.delete("/coach")
+def coach_clear(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    db.query(ChatMessage).filter(ChatMessage.user_id == user.id).delete()
+    db.commit()
+    return {"ok": True}

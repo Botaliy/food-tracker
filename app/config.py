@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # Weekly review: one call per user per day at most, a few cents each.
     review_model: str = "claude-opus-5-5"
     review_effort: str = "medium"
+    # Coach chat: a fresh snapshot of the diary goes with every message.
+    coach_model: str = "claude-opus-5-5"
+    coach_effort: str = "low"
+    coach_daily_messages: int = 25  # per user, on top of the $ limits
 
     secret_key: str = "change-me"
     # Sessions last this long; friends add the app to the home screen and stay signed in.
