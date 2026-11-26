@@ -17,7 +17,7 @@ SEND_WEEKDAY=7
 FORCE_SEND=${1:-}  # "--send" sends today regardless of the weekday
 
 env_value() {  # env_value FILE NAME: read one value without sourcing the whole file
-    grep -E "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"'\r'
+    { grep -E "^$2=" "$1" 2>/dev/null || true; } | tail -1 | cut -d= -f2- | tr -d '"'"'"'\r'
 }
 
 stamp=$(date +%F)
