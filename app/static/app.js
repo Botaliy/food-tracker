@@ -84,7 +84,7 @@ async function shrinkPhoto(file, maxEdge = 1280) {
 
 // ---------- state ----------
 
-const state = { me: null, view: "day", day: isoDate(new Date()), dayData: null, statsDays: 7, stats: null, selected: null };
+const state = { me: null, view: "day", day: isoDate(new Date()), dayData: null, statsDays: 7, stats: null, selected: null, review: null, reviewBusy: false, reviewError: "" };
 
 // ---------- auth ----------
 
@@ -200,6 +200,8 @@ app.addEventListener("click", (e) => {
   } else if (act === "open-day") {
     state.day = state.selected;
     loadDay();
+  } else if (act === "review") {
+    makeReview();
   } else if (act === "save-weight") {
     saveWeight();
   } else if (act === "add") {
@@ -224,7 +226,12 @@ const plural = (n, one, few, many) => {
 async function loadStats() {
   state.view = "reports";
   try {
-    state.stats = await api(`/api/stats?days=${state.statsDays}`);
+    const [stats, review] = await Promise.all([
+      api(`/api/stats?days=${state.statsDays}`),
+      state.review ? Promise.resolve(state.review) : api("/api/review"),
+    ]);
+    state.stats = stats;
+    state.review = review;
     renderStats();
   } catch (err) {
     if (err.status === 401) return renderAuth();
@@ -298,6 +305,7 @@ function renderStats() {
       <div class="tile"><span class="muted small">В норме</span><b>${s.in_goal_days}<small> / ${s.logged_days}</small></b><span class="muted small">дней с записями</span></div>
       <div class="tile"><span class="muted small">В среднем</span><b>${r0(a.kcal)}</b><span class="muted small">ккал/день</span></div>
     </div>
+    ${reviewCard()}
     <div class="card">
       <div class="row between"><b>Калории</b><span class="muted small">${s.logged_days ? `среднее ${r0(a.kcal)} из ${g.kcal}` : "нет записей"}</span></div>
       ${kcalChart(s)}
@@ -322,6 +330,41 @@ function renderStats() {
       </form>
     </div>`;
   $("#weight-form").onsubmit = (e) => { e.preventDefault(); saveWeight(); };
+}
+
+function reviewCard() {
+  const r = state.review?.review;
+  const list = (title, items) => items?.length ? `<div class="rv-sec"><span class="muted small">${title}</span><ul>${items.map((t) => `<li>${esc(t)}</li>`).join("")}</ul></div>` : "";
+  let body;
+  if (state.reviewBusy) {
+    body = '<div class="spinner"></div><p class="center muted small">Смотрю на неделю…</p>';
+  } else if (r) {
+    body = `<p class="rv-summary">${esc(r.summary)}</p>
+      ${list("Получается", r.good)}${list("Мешает", r.improve)}${list("Советы на неделю", r.tips)}
+      ${state.review.fresh ? "" : '<button class="block" data-act="review">Обновить обзор</button>'}`;
+  } else {
+    body = `<p class="muted small" style="margin:6px 0 10px">ИИ посмотрит на последние 7 дней и подскажет, что поправить. Стоит пару центов из дневного лимита.</p>
+      <button class="primary block" data-act="review">Получить обзор</button>`;
+  }
+  return `<div class="card review">
+    <div class="row between"><b>✨ Обзор недели</b>${r && !state.reviewBusy ? `<span class="muted small">${esc(dayLabel(r.date))}</span>` : ""}</div>
+    ${body}
+    ${state.reviewError ? `<div class="error">${esc(state.reviewError)}</div>` : ""}
+  </div>`;
+}
+
+async function makeReview() {
+  state.reviewBusy = true;
+  state.reviewError = "";
+  renderStats();
+  try {
+    state.review = await api("/api/review", { method: "POST" });
+    state.me = await api("/api/me");
+  } catch (err) {
+    state.reviewError = err.message;
+  }
+  state.reviewBusy = false;
+  if (state.view === "reports") renderStats();
 }
 
 async function saveWeight() {
@@ -684,6 +727,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible" || !state.dayData || !sheet.hidden) return;
   const today = isoDate(new Date());
   if (state.day === todayAtStart) state.day = today;
+  if (todayAtStart !== today) state.review = null;
   todayAtStart = today;
   if (state.view === "reports") loadStats(); else loadDay();
 });

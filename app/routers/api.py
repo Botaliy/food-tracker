@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -6,12 +7,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, foods, usage
+from app import auth, foods, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
 from app.images import release_memory, shrink
-from app.models import Food, Invite, Meal, MealItem, User, Weight, utcnow
+from app.models import Food, Invite, Meal, MealItem, Review, User, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
 router = APIRouter(prefix="/api")
@@ -439,3 +440,55 @@ def delete_weight(date_: date | None = Query(None, alias="date"), user: User = D
         db.delete(w)
         db.commit()
     return {"ok": True}
+
+
+# ---------- weekly review ----------
+
+def _review_dict(r: Review | None) -> dict | None:
+    return None if r is None else {"date": r.day.isoformat(), **json.loads(r.content)}
+
+
+@router.get("/review")
+def get_review(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    latest = db.scalar(select(Review).where(Review.user_id == user.id).order_by(Review.id.desc()).limit(1))
+    return {"review": _review_dict(latest), "fresh": latest is not None and latest.day == _today(user)}
+
+
+@router.post("/review")
+def make_review(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    today = _today(user)
+    # One review per day: pressing the button again shows the same one for free.
+    done = db.scalar(select(Review).where(Review.user_id == user.id, Review.day == today))
+    if done is not None:
+        return {"review": _review_dict(done), "fresh": True}
+
+    first = today - timedelta(days=review_mod.REVIEW_DAYS - 1)
+    start, _ = usage.day_bounds_utc(user.timezone, first)
+    _, end = usage.day_bounds_utc(user.timezone, today)
+    meals = db.scalars(
+        select(Meal).where(Meal.user_id == user.id, Meal.eaten_at >= start, Meal.eaten_at < end)
+        .options(selectinload(Meal.items))
+    ).all()
+    weights = db.scalars(
+        select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= today).order_by(Weight.day)
+    ).all()
+    digest = review_mod.build_digest(meals, weights, _me(db, user)["goals"], user.timezone, today)
+    if review_mod.logged_days(digest) < review_mod.MIN_LOGGED_DAYS:
+        raise HTTPException(status_code=400, detail=f"Для обзора нужны записи хотя бы за {review_mod.MIN_LOGGED_DAYS} дня из последних 7")
+    if problem := usage.limit_problem(db, user):
+        raise HTTPException(status_code=429, detail=problem)
+
+    model = get_settings().review_model
+    try:
+        result = review_mod.review(digest)
+    except review_mod.ReviewErrorWithResponse as exc:
+        usage.record_call(db, user, exc.response, model=model, error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except review_mod.ReviewError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    usage.record_call(db, user, result.response, model=model)
+    saved = Review(user_id=user.id, day=today, content=result.review.model_dump_json())
+    db.add(saved)
+    db.commit()
+    return {"review": _review_dict(saved), "fresh": True}

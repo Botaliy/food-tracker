@@ -102,6 +102,18 @@ class Weight(Base):
     kg: Mapped[float] = mapped_column(Float)
 
 
+class Review(Base):
+    """A weekly review by the model, kept so the same day never pays twice. content is ReviewOut as JSON."""
+
+    __tablename__ = "reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date_] = mapped_column(Date)  # the user's local date it was made on; covers the 7 days up to it
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ApiCall(Base):
     __tablename__ = "api_calls"
 

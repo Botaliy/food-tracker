@@ -158,3 +158,10 @@ button.recent { display: flex; align-items: center; gap: 10px; width: 100%; text
 button.recent .grow > * { display: block; }
 button.recent .grow .small { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 button.recent > .small { text-align: right; white-space: nowrap; }
+
+/* weekly review */
+.review .rv-summary { margin: 8px 0 4px; }
+.review .rv-sec { margin-top: 10px; }
+.review ul { margin: 4px 0 0; padding-left: 18px; }
+.review li { margin: 3px 0; font-size: 15px; }
+.review button.block { margin-top: 12px; }

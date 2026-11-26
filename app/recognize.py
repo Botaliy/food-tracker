@@ -101,7 +101,12 @@ class RecognizeResult:
 
 
 def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic(api_key=get_settings().anthropic_api_key or None, max_retries=2, timeout=90)
+    key = get_settings().anthropic_api_key
+    # Without a key the SDK fails with a bare TypeError on the first request.
+    if not key:
+        logger.error("ANTHROPIC_API_KEY is not set")
+        raise RecognizeError("Сервис ИИ не настроен: нет ключа API")
+    return anthropic.Anthropic(api_key=key, max_retries=2, timeout=90)
 
 
 def recognize(image_jpeg: bytes | None, note: str, client: anthropic.Anthropic | None = None) -> RecognizeResult:

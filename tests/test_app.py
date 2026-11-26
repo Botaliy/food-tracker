@@ -230,6 +230,77 @@ def test_recent_meals_groups_repeats_by_title_and_products(client, db):
     assert client.get("/api/meals/recent").json() == []
 
 
+# ---------- weekly review ----------
+
+REVIEW = {"summary": "Неделя ровная.", "good": ["Белок в норме"], "improve": ["Вечером 50% калорий"], "tips": ["Перенеси часть ужина на обед"]}
+
+
+@pytest.fixture
+def fake_reviewer(monkeypatch):
+    from app import review as review_mod
+    fake = FakeClient(fake_response(json.dumps(REVIEW)))
+    fake.calls = 0
+    real = review_mod.review
+
+    def counted(digest):
+        fake.calls += 1
+        return real(digest, client=fake)
+
+    monkeypatch.setattr(review_mod, "review", counted)
+    return fake
+
+
+def test_review_needs_three_logged_days(client, db, fake_reviewer):
+    from datetime import timedelta
+    today = _local_today()
+    for k in range(2):
+        _eat(client, f"{today - timedelta(days=k)}T12:00:00", 100)
+    r = client.post("/api/review")
+    assert r.status_code == 400
+    assert fake_reviewer.calls == 0 and db.query(ApiCall).count() == 0
+
+
+def test_review_is_made_once_a_day_from_aggregates(client, db, fake_reviewer):
+    from datetime import timedelta
+    today = _local_today()
+    assert client.get("/api/review").json() == {"review": None, "fresh": False}
+    for k in (0, 1, 3):
+        _eat(client, f"{today - timedelta(days=k)}T20:00:00", 500)
+    client.put("/api/weight", json={"kg": 80})
+
+    r = client.post("/api/review")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"review": {"date": today.isoformat(), **REVIEW}, "fresh": True}
+    assert db.query(ApiCall).count() == 1
+
+    sent = fake_reviewer.kwargs["messages"][0]["content"]
+    digest = json.loads(sent.split("\n", 1)[1])
+    assert "admin" not in sent  # no username goes to the model
+    assert len(digest["days"]) == 7 and digest["days"][2] == {"date": (today - timedelta(days=4)).isoformat(),
+                                                             "weekday": digest["days"][2]["weekday"], "logged": False}
+    assert digest["days"][-1]["kcal"] == 500
+    assert digest["kcal_share_by_part_of_day_percent"] == {"вечер": 100}
+    assert digest["top_foods_by_kcal"] == [{"name": "x", "kcal_week": 1500, "times": 3}]
+    assert digest["weigh_ins_kg"] == [{"date": today.isoformat(), "kg": 80.0}]
+
+    # Same day again: the stored review, no second call.
+    assert client.post("/api/review").json()["review"]["summary"] == REVIEW["summary"]
+    assert fake_reviewer.calls == 1
+    assert client.get("/api/review").json()["fresh"] is True
+
+
+def test_review_respects_daily_limit(client, db, fake_reviewer):
+    from datetime import timedelta
+    from app.models import ApiCall as Call
+    today = _local_today()
+    for k in range(3):
+        _eat(client, f"{today - timedelta(days=k)}T12:00:00", 100)
+    db.add(Call(user_id=client.get("/api/me").json()["id"], model="claude-opus-5-5", cost_usd=1.0))
+    db.commit()
+    assert client.post("/api/review").status_code == 429
+    assert fake_reviewer.calls == 0
+
+
 # ---------- invites ----------
 
 def test_invite_flow(client):

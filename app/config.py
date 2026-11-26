@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     # misjudges portions more often; compare both on real photos before switching.
     recognize_model: str = "claude-sonnet-5-5"
     recognize_effort: str = "low"  # low | medium | high
+    # Weekly review: one call per user per day at most, a few cents each.
+    review_model: str = "claude-opus-5-5"
+    review_effort: str = "medium"
 
     secret_key: str = "change-me"
     # Sessions last this long; friends add the app to the home screen and stay signed in.
