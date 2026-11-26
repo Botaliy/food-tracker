@@ -774,11 +774,61 @@ function stopScan() {
   scanStream = null;
 }
 
+const ZXING_SRC = "/static/vendor/zxing-0.23.0.min.js";
+let zxingLoading = null;
+function loadZxing() {
+  if (window.ZXing) return Promise.resolve();
+  zxingLoading ??= new Promise((ok, fail) => {
+    const el = document.createElement("script");
+    el.src = ZXING_SRC;
+    el.onload = ok;
+    el.onerror = () => { zxingLoading = null; fail(new Error("zxing")); };
+    document.head.appendChild(el);
+  });
+  return zxingLoading;
+}
+
+// A function that reads one video frame: the browser's own detector where there is one,
+// else zxing on a canvas (Safari on iPhone has no BarcodeDetector).
+async function frameReader() {
+  if ("BarcodeDetector" in window) {
+    const formats = (await BarcodeDetector.getSupportedFormats()).filter((f) => ["ean_13", "ean_8", "upc_a", "upc_e"].includes(f));
+    if (formats.length) {
+      const detector = new BarcodeDetector({ formats });
+      return async (video) => (await detector.detect(video))[0]?.rawValue || null;
+    }
+  }
+  await loadZxing();
+  const Z = window.ZXing;
+  const reader = new Z.MultiFormatReader();
+  reader.setHints(new Map([
+    [Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A, Z.BarcodeFormat.UPC_E]],
+    [Z.DecodeHintType.TRY_HARDER, true],
+  ]));
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  return async (video) => {
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return null;
+    // The middle band of the frame, where the guide line is, at most 800 px wide.
+    const bandH = Math.round(h * 0.4), scale = Math.min(1, 800 / w);
+    canvas.width = Math.round(w * scale);
+    canvas.height = Math.round(bandH * scale);
+    ctx.drawImage(video, 0, Math.round((h - bandH) / 2), w, bandH, 0, 0, canvas.width, canvas.height);
+    try {
+      const bitmap = new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(canvas)));
+      return reader.decodeWithState(bitmap).getText();
+    } catch {
+      return null; // nothing readable in this frame
+    }
+  };
+}
+
 async function openScanner() {
-  const live = "BarcodeDetector" in window && navigator.mediaDevices?.getUserMedia;
+  const live = !!navigator.mediaDevices?.getUserMedia;
   openSheet(`
     <div class="row between"><h2>Штрихкод</h2><button class="ghost" data-close>✕</button></div>
-    ${live ? '<div class="scan-box"><video id="scan-video" playsinline muted></video><i class="scan-line"></i></div><p class="small muted center">Наведи камеру на штрихкод</p>' : ""}
+    ${live ? '<div class="scan-box"><video id="scan-video" playsinline muted autoplay></video><i class="scan-line"></i></div><p class="small muted center">Наведи камеру на штрихкод</p>' : ""}
     <form id="code-form" class="row" style="margin-top:8px">
       <input name="code" inputmode="numeric" autocomplete="off" placeholder="${live ? "Или введи цифры под штрихкодом" : "Цифры под штрихкодом"}" required>
       <button class="primary">Найти</button>
@@ -787,25 +837,28 @@ async function openScanner() {
   $("#code-form").onsubmit = (e) => { e.preventDefault(); findBarcode(e.target.code.value); };
   if (!live) return;
   try {
-    const formats = (await BarcodeDetector.getSupportedFormats()).filter((f) => ["ean_13", "ean_8", "upc_a", "upc_e"].includes(f));
-    const detector = new BarcodeDetector({ formats });
-    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    const [read, stream] = await Promise.all([
+      frameReader(),
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment", width: { ideal: 1280 } } }),
+    ]);
+    scanStream = stream;
     const video = $("#scan-video");
-    video.srcObject = scanStream;
+    if (!video) return stopScan(); // the sheet was closed while the camera started
+    video.srcObject = stream;
     await video.play();
     const tick = async () => {
       if (!scanStream) return;
-      try {
-        const [hit] = await detector.detect(video);
-        if (hit?.rawValue) { stopScan(); navigator.vibrate?.(60); return findBarcode(hit.rawValue); }
-      } catch { /* a frame that couldn't be read */ }
-      scanTimer = setTimeout(tick, 200);
+      let code = null;
+      try { code = await read(video); } catch { /* a frame that couldn't be read */ }
+      if (code) { stopScan(); navigator.vibrate?.(60); return findBarcode(code); }
+      scanTimer = setTimeout(tick, 150);
     };
     tick();
   } catch {
     stopScan();
     $(".scan-box")?.remove();
-    $("#scan-error").textContent = "Камера недоступна — введи цифры вручную";
+    const err = $("#scan-error");
+    if (err) err.textContent = "Камера недоступна — введи цифры вручную";
   }
 }
 
