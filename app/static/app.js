@@ -32,20 +32,51 @@ async function api(path, { method = "GET", json, form } = {}) {
 }
 
 let toastTimer;
-function toast(text) {
+function toast(text, action = null) {
   const t = $("#toast");
   t.textContent = text;
+  if (action) {
+    const b = document.createElement("button");
+    b.textContent = action.label;
+    b.onclick = () => { t.hidden = true; action.run(); };
+    t.append(" ", b);
+  }
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), 3500);
+  toastTimer = setTimeout(() => (t.hidden = true), action ? 6000 : 3500);
 }
 
 function openSheet(html) {
   sheetBody.innerHTML = html;
   sheet.hidden = false;
+  document.documentElement.classList.add("sheet-open");
   sheetBody.scrollTop = 0;
 }
-function closeSheet() { stopScan(); sheet.hidden = true; sheetBody.innerHTML = ""; draft = null; }
+function closeSheet() {
+  stopScan();
+  if (draft && !draft.id && draft.items.length) {
+    stashDraft();
+    toast("Черновик сохранён — вернёшь его через «+»");
+  }
+  sheet.hidden = true;
+  document.documentElement.classList.remove("sheet-open");
+  sheetBody.innerHTML = "";
+  draft = null;
+}
+
+// An unsaved new meal survives closing the sheet and the app itself: recognition costs money.
+const draftKey = () => `ft-draft:${state.me?.username || ""}`;
+function stashDraft() {
+  if (!draft || draft.id || !draft.items.length) return;
+  try { localStorage.setItem(draftKey(), JSON.stringify({ at: Date.now(), day: state.day, draft })); } catch { /* storage full or off */ }
+}
+function stashedDraft() {
+  try {
+    const v = JSON.parse(localStorage.getItem(draftKey()) || "null");
+    return v && Date.now() - v.at < 24 * 3600e3 ? v : null;
+  } catch { return null; }
+}
+const dropStash = () => { try { localStorage.removeItem(draftKey()); } catch { /* ignore */ } };
 sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });
 
 function totalsOf(items) {
@@ -293,7 +324,7 @@ app.addEventListener("click", (e) => {
     openSettings();
   } else if (mealEl) {
     const meal = state.dayData.meals.find((m) => m.id === Number(mealEl.dataset.meal));
-    if (meal) openEditor({ id: meal.id, title: meal.title, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
+    if (meal) openEditor({ id: meal.id, title: meal.title, eaten_at: meal.eaten_at, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
   }
 });
 
@@ -493,39 +524,69 @@ let pendingPhoto = null;
 
 function openAdd() {
   pendingPhoto = null;
+  const stash = stashedDraft();
+  const stashKcal = stash ? r0(totalsOf(stash.draft.items).kcal) : 0;
   openSheet(`
-    <div class="row between"><h2>Что будешь есть?</h2><button class="ghost" data-close>✕</button></div>
+    <div class="row between"><h2>Что съел?</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+    ${stash ? `<div class="resume"><button class="grow" id="resume">↩️ Вернуться к черновику: ${esc(stash.draft.title || "без названия")} · ${stashKcal} ккал</button>
+      <button class="ghost" id="resume-drop" aria-label="Выбросить черновик">✕</button></div>` : ""}
+    <div class="row add-search">
+      <input id="add-q" type="search" placeholder="🔍 Найти продукт" autocomplete="off" enterkeyhint="search">
+      <button id="scan" aria-label="Сканировать штрихкод">🏷️</button>
+    </div>
+    <div class="search-results" id="add-results"></div>
     <div class="pick">
       <label class="btn">📷<span>Сфотографировать</span><input type="file" accept="image/*" capture="environment" data-photo></label>
       <label class="btn">🖼️<span>Из галереи</span><input type="file" accept="image/*" data-photo></label>
     </div>
-    <img class="preview" id="preview" hidden alt="">
-    <label>Уточнение (необязательно)</label>
-    <textarea id="note" placeholder="Например: рис 150 г, курица жарена на масле. Или просто текстом: 2 яйца и тост с маслом"></textarea>
+    <details class="describe" id="describe">
+      <summary>✏️ Описать словами или уточнить к фото</summary>
+      <textarea id="note" placeholder="Например: 2 яйца и тост с маслом. К фото: рис 150 г, жарено на масле"></textarea>
+      <button class="primary block" id="recognize" style="margin-top:8px">Посчитать</button>
+    </details>
     <div class="error" id="add-error"></div>
-    <button class="primary block" id="recognize" style="margin-top:12px">Посчитать</button>
-    <div class="row" style="margin-top:8px">
-      <button class="grow" id="manual">Ввести вручную</button>
-      <button class="grow" id="scan">🏷️ Штрихкод</button>
-    </div>
-    <div id="recent"></div>
+    <div id="recent"><h3 class="sub">Часто ешь</h3><div class="skeleton"></div><div class="skeleton"></div></div>
+    <button class="block ghost-line" id="manual">Собрать вручную</button>
     <p class="muted small center" id="spent"></p>`);
   const me = state.me;
-  if (me) $("#spent").textContent = `Потрачено сегодня $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}`;
+  if (me) $("#spent").textContent = `Распознавания сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}`;
   loadRecent();
 }
 
 let recentMeals = [];
 async function loadRecent() {
-  try { recentMeals = await api("/api/meals/recent"); } catch { return; }
+  try { recentMeals = await api("/api/meals/recent"); } catch { recentMeals = []; }
   const box = $("#recent");
-  if (!box || !recentMeals.length) return;
-  box.innerHTML = `<h3 class="sub">Часто ешь</h3>` + recentMeals.map((m, j) => `
-    <button class="recent" data-recent="${j}">
-      <span class="grow"><b>${esc(m.title || m.items.map((i) => i.name).join(", "))}</b>
-        <span class="small muted">${m.title ? esc(m.items.map((i) => `${i.name} ${r0(i.grams)} г`).join(" · ")) : ""}</span></span>
-      <span class="small"><b>${r0(m.totals.kcal)}</b> ккал${m.count > 1 ? `<br><span class="muted">×${m.count}</span>` : ""}</span>
-    </button>`).join("");
+  if (!box) return;
+  if (!recentMeals.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<h3 class="sub">Часто ешь <span class="muted">— тап записывает сразу</span></h3>` + recentMeals.map((m, j) => `
+    <div class="recent">
+      <button class="recent-main" data-recent="${j}">
+        <span class="grow"><b>${esc(m.title || m.items.map((i) => i.name).join(", "))}</b>
+          <span class="small muted">${m.title ? esc(m.items.map((i) => `${i.name} ${r0(i.grams)} г`).join(" · ")) : ""}</span></span>
+        <span class="small"><b>${r0(m.totals.kcal)}</b> ккал${m.count > 1 ? `<br><span class="muted">×${m.count}</span>` : ""}</span>
+      </button>
+      <button class="recent-edit" data-recent-edit="${j}" aria-label="Изменить перед записью">✎</button>
+    </div>`).join("");
+}
+
+// One tap: the meal is written as it was, with an undo.
+async function logAgain(m) {
+  const body = {
+    title: m.title,
+    items: m.items.map((i) => ({ name: i.name, grams: i.grams, food_id: i.food_id ?? null, source: i.source,
+      kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100 })),
+  };
+  try {
+    const saved = await api("/api/meals", { method: "POST", json: body });
+    closeSheet();
+    state.day = isoDate(new Date());
+    await loadDay();
+    toast(`Записано: ${m.title || m.items[0]?.name || "приём пищи"}`, {
+      label: "Отменить",
+      run: async () => { await api(`/api/meals/${saved.id}`, { method: "DELETE" }).catch(() => {}); loadDay(); },
+    });
+  } catch (err) { toast(err.message); }
 }
 
 // A copy of an existing meal as a new, unsaved one eaten now.
@@ -539,21 +600,36 @@ sheetBody.addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   if (!file) return;
   pendingPhoto = await shrinkPhoto(file);
-  const img = $("#preview");
-  img.src = URL.createObjectURL(pendingPhoto);
-  img.hidden = false;
+  recognizeNow();
 });
 
 sheetBody.addEventListener("click", async (e) => {
   if (e.target.closest("[data-close]")) return closeSheet();
   if (e.target.id === "manual") return openEditor({ title: "", items: [], comment: "" });
-  if (e.target.id === "scan") return openScanner();
+  if (e.target.closest("#scan")) return openScanner();
+  if (e.target.id === "resume") { const st = stashedDraft(); if (st) openEditor(st.draft); return; }
+  if (e.target.id === "resume-drop") { dropStash(); e.target.closest(".resume").remove(); return; }
   const rec = e.target.closest("[data-recent]");
-  if (rec) return repeatMeal(recentMeals[Number(rec.dataset.recent)]);
-  if (e.target.id !== "recognize") return;
+  if (rec) { rec.disabled = true; return logAgain(recentMeals[Number(rec.dataset.recent)]); }
+  const recEdit = e.target.closest("[data-recent-edit]");
+  if (recEdit) return repeatMeal(recentMeals[Number(recEdit.dataset.recentEdit)]);
+  const found = e.target.closest("[data-add-found]");
+  if (found) {
+    const f = addResults[Number(found.dataset.addFound)];
+    return openEditor({ title: "", items: [{ ...f, grams: r0(f.last_grams || 100), options: [f] }], comment: "" });
+  }
+  if (e.target.dataset.addCustom) return openCustomFood($("#add-q").value.trim());
+  if (e.target.id === "recognize") recognizeNow();
+});
 
-  const note = $("#note").value.trim();
-  if (!pendingPhoto && !note) { $("#add-error").textContent = "Добавь фото или опиши еду словами"; return; }
+sheetBody.addEventListener("input", (e) => {
+  if (e.target.id === "add-q") searchFoodsInto(e.target.value, "#add-results", "add");
+});
+
+let addResults = [];
+async function recognizeNow() {
+  const note = $("#note")?.value.trim() || "";
+  if (!pendingPhoto && !note) { $("#describe").open = true; $("#add-error").textContent = "Добавь фото или опиши еду словами"; return; }
   const form = new FormData();
   if (pendingPhoto) form.append("photo", pendingPhoto, "meal.jpg");
   form.append("note", note);
@@ -571,9 +647,10 @@ sheetBody.addEventListener("click", async (e) => {
     if (err.status === 401) { closeSheet(); return renderAuth(); }
     openAdd();
     $("#note").value = note;
+    if (note) $("#describe").open = true;
     $("#add-error").textContent = err.message;
   }
-});
+}
 
 // ---------- draft / meal editor ----------
 
@@ -581,8 +658,17 @@ let draft = null;
 
 function openEditor(d) {
   draft = structuredClone(d);
+  if (!draft.time) {
+    const at = draft.eaten_at ? new Date(draft.eaten_at) : new Date();
+    const isPast = !draft.id && !draft.today && state.day !== isoDate(new Date());
+    draft.time = isPast ? "13:00" : at.toTimeString().slice(0, 5);
+    draft.day = draft.eaten_at ? isoDate(at) : (draft.today ? isoDate(new Date()) : state.day);
+  }
   renderEditor();
 }
+
+const MEAL_TYPES = [["Завтрак", "08:30"], ["Обед", "13:00"], ["Ужин", "19:00"], ["Перекус", null]];
+const typeOf = (time) => { const h = Number(time.slice(0, 2)); return h < 11 ? "Завтрак" : h < 16 ? "Обед" : h < 22 ? "Ужин" : "Перекус"; };
 
 const SOURCE_LABEL = { usda: "база USDA", off: "Open Food Facts", custom: "мой продукт", estimate: "оценка ИИ", manual: "вручную" };
 
@@ -590,11 +676,11 @@ function itemHtml(it, idx) {
   const k = (Number(it.grams) || 0) / 100;
   const badge = it.source === "estimate" || it.source === "manual" ? "" : "db";
   const opts = (it.options || []).map((o, j) =>
-    `<option value="${j}" ${o.food_id === it.food_id && o.source === it.source ? "selected" : ""}>${esc(o.source === "estimate" ? "Оценка ИИ" : o.name_en || o.name)} — ${r0(o.kcal_100)} ккал/100 г</option>`).join("");
+    `<option value="${j}" ${o.food_id === it.food_id && o.source === it.source ? "selected" : ""}>${esc(o.source === "estimate" ? "Оценка ИИ" : o.name || o.name_en)} — ${r0(o.kcal_100)} ккал/100 г</option>`).join("");
   return `<div class="item" data-idx="${idx}">
     <div class="row between">
       <div class="grow">
-        <div class="item-name">${esc(it.name)}</div>
+        <input class="item-name" data-name="${idx}" value="${esc(it.name)}" aria-label="Название продукта">
         <div class="small muted">
           <span class="badge ${badge}">${SOURCE_LABEL[it.source] || it.source}</span>
           ${it.confidence === "low" ? '<span class="badge low">не уверен</span>' : ""}
@@ -611,6 +697,7 @@ function itemHtml(it, idx) {
       </div>
       <div class="small" data-item-total="${idx}">${itemTotals(it)}</div>
     </div>
+    <div class="mult">${[["½", 0.5], ["×1,5", 1.5], ["×2", 2]].map(([l, k]) => `<button data-mult="${k}" data-i="${idx}">${l}</button>`).join("")}</div>
     ${opts ? `<select data-opt="${idx}">${opts}</select>` : ""}
   </div>`;
 }
@@ -622,8 +709,12 @@ function itemTotals(it) {
 
 function renderEditor() {
   openSheet(`
-    <div class="row between"><h2>${draft.id ? "Редактирование" : "Проверь и поправь"}</h2><button class="ghost" data-close>✕</button></div>
-    <input id="title" value="${esc(draft.title)}" placeholder="Название, например «Обед»">
+    <div class="row between"><h2>${draft.id ? "Редактирование" : "Проверь и поправь"}</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+    <div class="when">
+      ${MEAL_TYPES.map(([name]) => `<button class="chip-btn ${(draft.title || typeOf(draft.time)) === name ? "on" : ""}" data-type="${name}">${name}</button>`).join("")}
+      <input type="time" id="time" value="${draft.time}" aria-label="Время">
+    </div>
+    <input id="title" value="${esc(draft.title)}" placeholder="Название (необязательно)">
     ${draft.comment ? `<p class="small muted">💡 ${esc(draft.comment)}</p>` : ""}
     ${draft.personal_hints ? '<p class="small muted">🎯 Учтены твои прошлые правки порций</p>' : ""}
     <div class="card" style="margin-top:10px" id="items">${draft.items.map(itemHtml).join("") || '<p class="muted small">Добавь продукты через поиск ниже</p>'}</div>
@@ -637,6 +728,7 @@ function renderEditor() {
       ${draft.id ? '<button class="block" id="repeat" style="margin-top:8px">Записать ещё раз сегодня</button><button class="block danger" id="delete" style="margin-top:8px">Удалить приём пищи</button>' : ""}
     </div>`);
   updateDraftTotals();
+  stashDraft();
 }
 
 function updateDraftTotals() {
@@ -651,13 +743,17 @@ function setGrams(idx, grams) {
   if (input && Number(input.value) !== draft.items[idx].grams) input.value = r0(draft.items[idx].grams);
   sheetBody.querySelector(`[data-item-total="${idx}"]`).innerHTML = itemTotals(draft.items[idx]);
   updateDraftTotals();
+  stashDraft();
 }
 
 sheetBody.addEventListener("input", (e) => {
   if (!draft) return;
   if (e.target.dataset.grams !== undefined) setGrams(Number(e.target.dataset.grams), Number(e.target.value) || 0);
   if (e.target.id === "title") draft.title = e.target.value;
+  if (e.target.id === "time") draft.time = e.target.value || draft.time;
+  if (e.target.dataset.name !== undefined) draft.items[Number(e.target.dataset.name)].name = e.target.value;
   if (e.target.id === "food-q") searchFoods(e.target.value);
+  stashDraft();
 });
 
 sheetBody.addEventListener("change", (e) => {
@@ -670,16 +766,20 @@ sheetBody.addEventListener("change", (e) => {
 });
 
 let searchTimer, searchResults = [];
-function searchFoods(q) {
+const searchFoods = (q) => searchFoodsInto(q, "#food-results", "editor");
+
+function searchFoodsInto(q, sel, where) {
   clearTimeout(searchTimer);
-  const box = $("#food-results");
+  const box = $(sel);
   if (q.trim().length < 2) { box.innerHTML = ""; return; }
   searchTimer = setTimeout(async () => {
     try {
-      searchResults = await api(`/api/foods/search?q=${encodeURIComponent(q)}`);
-      box.innerHTML = searchResults.map((f, j) =>
-        `<button data-add-food="${j}">${esc(f.name)} <span class="muted">${r0(f.kcal_100)} ккал/100 г</span></button>`).join("")
-        + `<button data-custom="1">＋ Свой продукт «${esc(q)}»</button>`;
+      const res = await api(`/api/foods/search?q=${encodeURIComponent(q)}`);
+      if (where === "add") addResults = res; else searchResults = res;
+      const attr = where === "add" ? "data-add-found" : "data-add-food";
+      box.innerHTML = res.map((f, j) =>
+        `<button ${attr}="${j}">${esc(f.name)} <span class="muted">${r0(f.kcal_100)} ккал/100 г${f.last_grams ? ` · обычно ${r0(f.last_grams)} г` : ""}</span></button>`).join("")
+        + `<button ${where === "add" ? "data-add-custom" : "data-custom"}="1">＋ Свой продукт «${esc(q)}»</button>`;
     } catch (err) { box.innerHTML = `<div class="error">${esc(err.message)}</div>`; }
   }, 250);
 }
@@ -688,7 +788,16 @@ sheetBody.addEventListener("click", async (e) => {
   if (!draft) return;
   const t = e.target.closest("button");
   if (!t) return;
-  if (t.dataset.step) {
+  if (t.dataset.type) {
+    const [name, time] = MEAL_TYPES.find(([n]) => n === t.dataset.type);
+    if (time) draft.time = time;
+    // The chip names the meal unless the user typed a name of their own.
+    if (!draft.title || MEAL_TYPES.some(([n]) => n === draft.title)) draft.title = name === typeOf(draft.time) ? "" : name;
+    renderEditor();
+  } else if (t.dataset.mult) {
+    const idx = Number(t.dataset.i);
+    setGrams(idx, Math.round((Number(draft.items[idx].grams) || 0) * Number(t.dataset.mult)));
+  } else if (t.dataset.step) {
     const idx = Number(t.dataset.i);
     setGrams(idx, (Number(draft.items[idx].grams) || 0) + Number(t.dataset.step));
   } else if (t.dataset.del !== undefined) {
@@ -696,7 +805,7 @@ sheetBody.addEventListener("click", async (e) => {
     renderEditor();
   } else if (t.dataset.addFood !== undefined) {
     const f = searchResults[Number(t.dataset.addFood)];
-    draft.items.push({ ...f, grams: 100, options: [f] });
+    draft.items.push({ ...f, grams: r0(f.last_grams || 100), options: [f] });
     renderEditor();
   } else if (t.dataset.custom) {
     openCustomFood($("#food-q").value.trim());
@@ -725,13 +834,11 @@ async function saveDraft(btn) {
       ai_grams: i.ai_grams ?? null,
     })),
   };
-  // A new meal lands on the day being viewed: "now" for today, midday for a past day.
-  // A repeated meal is always eaten now.
-  if (!draft.id && !draft.today && state.day !== isoDate(new Date())) body.eaten_at = `${state.day}T12:00:00`;
-  const toToday = !draft.id && draft.today;
+  // The day the meal belongs to (the viewed day for a new one) at the time in the editor.
+  body.eaten_at = `${draft.day}T${draft.time}:00`;
   try {
     await api(draft.id ? `/api/meals/${draft.id}` : "/api/meals", { method: draft.id ? "PUT" : "POST", json: body });
-    if (toToday) state.day = isoDate(new Date());
+    if (!draft.id) { dropStash(); state.day = draft.day; }
     draft = null; closeSheet(); toast("Записано"); loadDay();
   } catch (err) { btn.disabled = false; toast(err.message); }
 }
@@ -827,7 +934,7 @@ async function frameReader() {
 async function openScanner() {
   const live = !!navigator.mediaDevices?.getUserMedia;
   openSheet(`
-    <div class="row between"><h2>Штрихкод</h2><button class="ghost" data-close>✕</button></div>
+    <div class="row between"><h2>Штрихкод</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
     ${live ? '<div class="scan-box"><video id="scan-video" playsinline muted autoplay></video><i class="scan-line"></i></div><p class="small muted center">Наведи камеру на штрихкод</p>' : ""}
     <form id="code-form" class="row" style="margin-top:8px">
       <input name="code" inputmode="numeric" autocomplete="off" placeholder="${live ? "Или введи цифры под штрихкодом" : "Цифры под штрихкодом"}" required>
@@ -885,7 +992,7 @@ async function openSettings() {
   const me = state.me || (state.me = await api("/api/me"));
   const g = me.goals;
   openSheet(`
-    <div class="row between"><h2>Настройки</h2><button class="ghost" data-close>✕</button></div>
+    <div class="row between"><h2>Настройки</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
     <form class="card" id="goals">
       <b>Норма в день</b>
       <div class="row"><div class="grow"><label>Ккал</label><input name="kcal" type="number" value="${g.kcal}"></div>

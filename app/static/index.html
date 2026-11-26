@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>КБЖУ по фото</title>
-  <meta name="theme-color" content="#16a34a">
+  <meta name="theme-color" content="#f3f4f0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0f110e" media="(prefers-color-scheme: dark)">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
@@ -16,7 +17,7 @@
   <main id="app"><p class="muted center">Загрузка…</p></main>
   <nav id="tabbar" class="tabbar" hidden></nav>
   <div id="sheet" class="sheet" hidden><div class="sheet-body" id="sheet-body"></div></div>
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

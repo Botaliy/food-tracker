@@ -173,7 +173,25 @@ def recognize_meal(
 
 @router.get("/foods/search")
 def search_foods(q: str, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
-    return [foods.food_dict(f) for f in foods.search(db, q, user.id, limit=15)]
+    found = foods.search(db, q, user.id, limit=15)
+    last = _last_grams(db, user, [f.id for f in found])
+    return [{**foods.food_dict(f), "last_grams": last.get(f.id)} for f in found]
+
+
+def _last_grams(db: Session, user: User, food_ids: list[int]) -> dict[int, float]:
+    """How much of each food the user took last time: a better start than 100 g."""
+    if not food_ids:
+        return {}
+    rows = db.execute(
+        select(MealItem.food_id, MealItem.grams)
+        .join(Meal, Meal.id == MealItem.meal_id)
+        .where(Meal.user_id == user.id, MealItem.food_id.in_(food_ids))
+        .order_by(MealItem.id.desc())
+    ).all()
+    out: dict[int, float] = {}
+    for food_id, grams in rows:
+        out.setdefault(food_id, grams)
+    return out
 
 
 class FoodIn(BaseModel):
