@@ -78,6 +78,8 @@ def _add_missing_columns(conn) -> None:
             if default is not None:
                 ddl += f" NOT NULL DEFAULT {int(default) if isinstance(default, bool) else repr(default)}"
             conn.execute(text(ddl))
+        for index in table.indexes:  # an index on a column added above
+            index.create(conn, checkfirst=True)
 
 
 def get_session() -> Session:

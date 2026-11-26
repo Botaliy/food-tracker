@@ -8,7 +8,7 @@ picks between close text matches and stands in when nothing fits.
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.models import Food
@@ -47,7 +47,8 @@ def _match(db: Session, query: str, n: int) -> list[int]:
 
 
 def search(db: Session, phrase: str, user_id: int | None, limit: int = CANDIDATES) -> list[Food]:
-    """Foods best matching a phrase (English or Russian), the user's own first."""
+    """Foods best matching a phrase (English or Russian). Foods people added (by hand or by
+    barcode) are shared by everyone here: the user's own first, then the others', then USDA."""
     any_word = fts_query(phrase)
     if any_word is None:
         return []
@@ -61,12 +62,12 @@ def search(db: Session, phrase: str, user_id: int | None, limit: int = CANDIDATE
     foods = {
         f.id: f
         for f in db.scalars(
-            select(Food).where(Food.id.in_(rows), or_(Food.owner_id.is_(None), Food.owner_id == user_id))
+            select(Food).where(Food.id.in_(rows))
         )
     }
     ranked = [foods[r] for r in rows if r in foods]
-    # The user's own foods are what they actually eat: put them first.
-    ranked.sort(key=lambda f: 0 if f.owner_id == user_id and user_id is not None else 1)
+    # What people here actually eat beats a generic database row.
+    ranked.sort(key=lambda f: 0 if user_id is not None and f.owner_id == user_id else 1 if f.source != "usda" else 2)
     return ranked[:limit]
 
 

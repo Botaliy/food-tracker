@@ -45,7 +45,7 @@ function openSheet(html) {
   sheet.hidden = false;
   sheetBody.scrollTop = 0;
 }
-function closeSheet() { sheet.hidden = true; sheetBody.innerHTML = ""; draft = null; }
+function closeSheet() { stopScan(); sheet.hidden = true; sheetBody.innerHTML = ""; draft = null; }
 sheet.addEventListener("click", (e) => { if (e.target === sheet) closeSheet(); });
 
 function totalsOf(items) {
@@ -504,7 +504,10 @@ function openAdd() {
     <textarea id="note" placeholder="Например: рис 150 г, курица жарена на масле. Или просто текстом: 2 яйца и тост с маслом"></textarea>
     <div class="error" id="add-error"></div>
     <button class="primary block" id="recognize" style="margin-top:12px">Посчитать</button>
-    <button class="block" id="manual" style="margin-top:8px">Ввести вручную</button>
+    <div class="row" style="margin-top:8px">
+      <button class="grow" id="manual">Ввести вручную</button>
+      <button class="grow" id="scan">🏷️ Штрихкод</button>
+    </div>
     <div id="recent"></div>
     <p class="muted small center" id="spent"></p>`);
   const me = state.me;
@@ -544,6 +547,7 @@ sheetBody.addEventListener("change", async (e) => {
 sheetBody.addEventListener("click", async (e) => {
   if (e.target.closest("[data-close]")) return closeSheet();
   if (e.target.id === "manual") return openEditor({ title: "", items: [], comment: "" });
+  if (e.target.id === "scan") return openScanner();
   const rec = e.target.closest("[data-recent]");
   if (rec) return repeatMeal(recentMeals[Number(rec.dataset.recent)]);
   if (e.target.id !== "recognize") return;
@@ -732,13 +736,14 @@ async function saveDraft(btn) {
   } catch (err) { btn.disabled = false; toast(err.message); }
 }
 
-function openCustomFood(name) {
+function openCustomFood(name, barcode = null, note = "") {
   const back = draft;
   openSheet(`
-    <div class="row between"><h2>Свой продукт</h2><button class="ghost" id="cf-back">←</button></div>
+    <div class="row between"><h2>Свой продукт</h2><button class="ghost" id="cf-back">${back ? "←" : "✕"}</button></div>
+    ${note ? `<p class="small">${esc(note)}</p>` : ""}
     <form id="cf">
       <label>Название</label><input name="name" value="${esc(name)}" required>
-      <p class="small muted">Значения на 100 г — обычно есть на упаковке.</p>
+      <p class="small muted">Значения на 100 г — обычно есть на упаковке. Продукт сохранится, и его найдут все${barcode ? " — и по штрихкоду тоже" : ""}.</p>
       <div class="row"><div class="grow"><label>Ккал</label><input name="kcal_100" type="number" step="0.1" inputmode="decimal" required></div>
       <div class="grow"><label>Белки</label><input name="protein_100" type="number" step="0.1" inputmode="decimal" required></div></div>
       <div class="row"><div class="grow"><label>Жиры</label><input name="fat_100" type="number" step="0.1" inputmode="decimal" required></div>
@@ -746,17 +751,79 @@ function openCustomFood(name) {
       <button class="primary block" style="margin-top:14px">Добавить</button>
     </form>`);
   draft = null; // keep editor handlers quiet while this form is open
-  $("#cf-back").onclick = () => { draft = back; renderEditor(); };
+  $("#cf-back").onclick = () => { if (back) { draft = back; renderEditor(); } else closeSheet(); };
   $("#cf").onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     try {
-      const food = await api("/api/foods", { method: "POST", json: { name: f.name, kcal_100: +f.kcal_100, protein_100: +f.protein_100, fat_100: +f.fat_100, carbs_100: +f.carbs_100 } });
-      draft = back;
-      draft.items.push({ ...food, grams: 100, options: [food] });
-      renderEditor();
+      const num = (v) => +String(v).replace(",", ".");
+      const food = await api("/api/foods", { method: "POST", json: {
+        name: f.name, kcal_100: num(f.kcal_100), protein_100: num(f.protein_100), fat_100: num(f.fat_100), carbs_100: num(f.carbs_100), barcode } });
+      if (back) { draft = back; draft.items.push({ ...food, grams: 100, options: [food] }); renderEditor(); }
+      else openEditor({ title: food.name, items: [{ ...food, grams: 100, options: [food] }], comment: "" });
     } catch (err) { toast(err.message); }
   };
+}
+
+// ---------- barcode ----------
+
+let scanStream = null, scanTimer = null;
+function stopScan() {
+  clearTimeout(scanTimer);
+  scanStream?.getTracks().forEach((t) => t.stop());
+  scanStream = null;
+}
+
+async function openScanner() {
+  const live = "BarcodeDetector" in window && navigator.mediaDevices?.getUserMedia;
+  openSheet(`
+    <div class="row between"><h2>Штрихкод</h2><button class="ghost" data-close>✕</button></div>
+    ${live ? '<div class="scan-box"><video id="scan-video" playsinline muted></video><i class="scan-line"></i></div><p class="small muted center">Наведи камеру на штрихкод</p>' : ""}
+    <form id="code-form" class="row" style="margin-top:8px">
+      <input name="code" inputmode="numeric" autocomplete="off" placeholder="${live ? "Или введи цифры под штрихкодом" : "Цифры под штрихкодом"}" required>
+      <button class="primary">Найти</button>
+    </form>
+    <div class="error" id="scan-error"></div>`);
+  $("#code-form").onsubmit = (e) => { e.preventDefault(); findBarcode(e.target.code.value); };
+  if (!live) return;
+  try {
+    const formats = (await BarcodeDetector.getSupportedFormats()).filter((f) => ["ean_13", "ean_8", "upc_a", "upc_e"].includes(f));
+    const detector = new BarcodeDetector({ formats });
+    scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    const video = $("#scan-video");
+    video.srcObject = scanStream;
+    await video.play();
+    const tick = async () => {
+      if (!scanStream) return;
+      try {
+        const [hit] = await detector.detect(video);
+        if (hit?.rawValue) { stopScan(); navigator.vibrate?.(60); return findBarcode(hit.rawValue); }
+      } catch { /* a frame that couldn't be read */ }
+      scanTimer = setTimeout(tick, 200);
+    };
+    tick();
+  } catch {
+    stopScan();
+    $(".scan-box")?.remove();
+    $("#scan-error").textContent = "Камера недоступна — введи цифры вручную";
+  }
+}
+
+async function findBarcode(raw) {
+  const code = String(raw).replace(/\D/g, "");
+  if (code.length < 6) { $("#scan-error").textContent = "Нужны цифры под штрихкодом"; return; }
+  stopScan();
+  sheetBody.innerHTML = '<div class="spinner"></div><p class="center muted">Ищу продукт…</p>';
+  try {
+    const food = await api(`/api/foods/barcode/${code}`);
+    openEditor({ title: food.name, items: [{ ...food, grams: 100, options: [food] }], comment: "Проверь вес порции — по умолчанию 100 г." });
+  } catch (err) {
+    if (err.status === 401) { closeSheet(); return renderAuth(); }
+    const note = err.status === 404
+      ? `Штрихкода ${code} ещё нет в базе. Перепиши значения с этикетки — в следующий раз продукт найдётся сразу.`
+      : err.message;
+    openCustomFood("", code, note);
+  }
 }
 
 // ---------- settings & admin ----------

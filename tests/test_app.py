@@ -60,11 +60,13 @@ def test_pick_rejects_far_off_match(db):
     assert foods.pick(found, foods.Per100(80, 1, 2, 10)) is None
 
 
-def test_custom_foods_are_private(db):
+def test_added_foods_are_shared_with_own_first(db):
     a, b = make_user(db, "anna"), make_user(db, "boris")
-    add_food(db, "Бабушкин пирог", 300, source="custom", owner_id=a.id)
-    assert foods.search(db, "пирог", user_id=a.id)
-    assert not foods.search(db, "пирог", user_id=b.id)
+    generic = add_food(db, "Pie, apple", 240)
+    anna = add_food(db, "Бабушкин пирог pie", 300, source="custom", owner_id=a.id)
+    boris = add_food(db, "Пирог с капустой pie", 200, source="custom", owner_id=b.id)
+    assert foods.search(db, "pie", user_id=b.id) == [boris, anna, generic]
+    assert foods.search(db, "pie", user_id=a.id)[0] == anna
 
 
 # ---------- recognition ----------
@@ -377,6 +379,55 @@ def test_stats_adaptive_needs_data_then_suggests(client):
     ad = client.get("/api/stats").json()["energy"]["adaptive"]
     assert ad["ready"] and ad["avg_intake"] == 2000
     assert ad["tdee"] == 2550 and ad["suggested"]["kcal"] == 2550  # no profile: keep weight
+
+
+# ---------- barcodes ----------
+
+OFF_PRODUCT = {"product_name": "Йогурт греческий 2%", "brands": "Fage, Total",
+               "nutriments": {"energy-kcal_100g": 73, "proteins_100g": "9.9", "fat_100g": 2, "carbohydrates_100g": 3.9}}
+
+
+def test_barcode_found_in_off_is_saved(client, db, monkeypatch):
+    from app import barcodes
+    from app.models import Food
+    calls = []
+    monkeypatch.setattr(barcodes, "_fetch", lambda code: calls.append(code) or OFF_PRODUCT)
+    r = client.get("/api/foods/barcode/5201054017401")
+    assert r.status_code == 200, r.text
+    food = r.json()
+    assert food["name"] == "Йогурт греческий 2% (Fage)" and food["source"] == "off" and food["protein_100"] == 9.9
+    assert client.get("/api/foods/barcode/5201054017401").json()["food_id"] == food["food_id"]
+    assert calls == ["5201054017401"]  # the second scan didn't ask again
+    assert [f["food_id"] for f in client.get("/api/foods/search?q=йогурт").json()] == [food["food_id"]]
+    assert db.query(Food).filter_by(barcode="5201054017401").count() == 1
+
+
+def test_unknown_barcode_then_label_by_hand(client, db, monkeypatch):
+    from app import barcodes
+    monkeypatch.setattr(barcodes, "_fetch", lambda code: None)
+    assert client.get("/api/foods/barcode/4600000000000").status_code == 404
+    assert client.get("/api/foods/barcode/12ab").status_code == 400
+    client.post("/api/foods", json={"name": "Сырок глазированный", "kcal_100": 410, "protein_100": 8,
+                                    "fat_100": 25, "carbs_100": 38, "barcode": "4600000000000"})
+    make_user(db, "boris")  # someone else scans the same pack
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
+    assert client.get("/api/foods/barcode/4600000000000").json()["name"] == "Сырок глазированный"
+
+    def down(code):
+        raise barcodes.LookupError_("timeout")
+    monkeypatch.setattr(barcodes, "_fetch", down)
+    assert client.get("/api/foods/barcode/4600000000001").status_code == 503
+
+
+def test_off_product_without_numbers_is_skipped():
+    from app import barcodes
+    from app.models import User
+    u = User(id=1)
+    assert barcodes.from_off({"product_name": "x", "nutriments": {}}, "1", u) is None
+    assert barcodes.from_off({"product_name": "", "nutriments": {"energy-kcal_100g": 50}}, "1", u) is None
+    kj = barcodes.from_off({"product_name": "Сок", "nutriments": {"energy_100g": 184.1}}, "1", u)
+    assert kj.kcal == 44.0
 
 
 # ---------- learning from corrections ----------

@@ -1,4 +1,5 @@
 import hashlib
+import logging
 import json
 import secrets
 from datetime import UTC, date, datetime, timedelta
@@ -9,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, corrections, diary, energy, foods, push, review as review_mod, usage
+from app import auth, barcodes, corrections, diary, energy, foods, push, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
@@ -17,6 +18,7 @@ from app.images import release_memory, shrink
 from app.models import Activity, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
@@ -180,17 +182,34 @@ class FoodIn(BaseModel):
     protein_100: float = Field(ge=0, le=100)
     fat_100: float = Field(ge=0, le=100)
     carbs_100: float = Field(ge=0, le=100)
+    barcode: str | None = Field(None, max_length=32)
 
 
 @router.post("/foods")
 def add_food(body: FoodIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
     food = Food(
         source="custom", name=body.name.strip(), name_ru=body.name.strip(), owner_id=user.id,
+        barcode=barcodes.normalize(body.barcode) if body.barcode else None,
         kcal=body.kcal_100, protein=body.protein_100, fat=body.fat_100, carbs=body.carbs_100,
     )
     db.add(food)
     db.commit()
     return foods.food_dict(food)
+
+
+@router.get("/foods/barcode/{code}")
+def food_by_barcode(code: str, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    norm = barcodes.normalize(code)
+    if norm is None:
+        raise HTTPException(status_code=400, detail="Это не похоже на штрихкод")
+    try:
+        food = barcodes.lookup(db, norm, user)
+    except barcodes.LookupError_ as exc:
+        logger.warning("Barcode lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail="База штрихкодов не отвечает — введи значения с этикетки") from exc
+    if food is None:
+        raise HTTPException(status_code=404, detail="Такого продукта ещё нет в базе")
+    return {**foods.food_dict(food), "barcode": norm}
 
 
 # ---------- meals ----------
@@ -229,7 +248,7 @@ def _item(db: Session, body: ItemIn, user: User) -> MealItem:
     )
     # A database food's numbers are taken from the database, not from the client.
     food = db.get(Food, body.food_id) if body.food_id is not None else None
-    if food is not None and food.owner_id in (None, user.id):
+    if food is not None:
         item.food_id, item.source = food.id, food.source
         item.kcal_100, item.protein_100, item.fat_100, item.carbs_100 = food.kcal, food.protein, food.fat, food.carbs
     return item

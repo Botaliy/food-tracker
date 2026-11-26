@@ -52,8 +52,9 @@ class Food(Base):
     protein: Mapped[float] = mapped_column(Float)
     fat: Mapped[float] = mapped_column(Float)
     carbs: Mapped[float] = mapped_column(Float)
-    # A custom food belongs to whoever added it; None for shared databases.
+    # Who added a custom or scanned food (shown first in their own search); None for USDA.
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    barcode: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
 
 
 class Meal(Base):
