@@ -266,6 +266,7 @@ function renderDay() {
             <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
     </div>
+    ${isToday ? weightLine(state.dayData.weight) : ""}
     ${isToday ? myStreaks(state.dayData.streaks) : ""}
     ${isToday ? streaksRow(state.streaks) : ""}
     ${meals.length
@@ -275,6 +276,40 @@ function renderDay() {
 }
 
 const fmtInt = (n) => r0(n).toLocaleString("ru-RU");
+
+const kgFmt = (n) => String(r1(n)).replace(".", ",");
+
+function weightLine(w) {
+  if (!w) return `<button class="card line-card" data-act="weigh">⚖️ <span class="grow">Записать вес — покажу тренд и посчитаю реальный расход</span><span class="pill">+</span></button>`;
+  const pace = w.kg_per_week == null ? "" : ` ${w.kg_per_week < 0 ? "↓" : w.kg_per_week > 0 ? "↑" : "→"}${kgFmt(Math.abs(w.kg_per_week))}/нед`;
+  const goal = !w.goal ? "" : w.eta === "reached" ? " · 🎉 цель достигнута"
+    : w.eta ? ` · цель ${kgFmt(w.goal)} к ${new Date(w.eta + "T12:00").toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}` : ` · цель ${kgFmt(w.goal)}`;
+  return `<button class="card line-card" data-act="weigh">⚖️ <span class="grow"><b>${kgFmt(w.today ?? w.last.kg)} кг</b>
+    <span class="muted small">тренд ${kgFmt(w.trend)}${pace}${goal}</span></span>
+    <span class="pill">${w.today != null ? "✎" : "записать"}</span></button>`;
+}
+
+function openWeigh() {
+  const w = state.dayData?.weight;
+  openSheet(`
+    <div class="row between"><h2>Вес сегодня</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+    <form id="weigh-form" class="row">
+      <input id="weigh-kg" type="text" inputmode="decimal" autocomplete="off" placeholder="кг" value="${w?.today ?? w?.last?.kg ?? ""}" autofocus>
+      <button class="primary">Сохранить</button>
+    </form>
+    <p class="muted small">Лучше взвешиваться утром, после туалета и до еды — так точки ровнее.</p>
+    ${w?.today != null ? '<button class="block danger" id="weigh-del">Удалить сегодняшнее взвешивание</button>' : ""}`);
+  $("#weigh-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const kg = Number($("#weigh-kg").value.replace(",", "."));
+    if (!(kg >= 20 && kg <= 400)) return toast("Вес — число от 20 до 400 кг");
+    try { await api("/api/weight", { method: "PUT", json: { kg } }); closeSheet(); toast("Вес записан"); loadDay(); }
+    catch (err) { toast(err.message); }
+  };
+  $("#weigh-del")?.addEventListener("click", async () => {
+    try { await api("/api/weight", { method: "DELETE" }); closeSheet(); loadDay(); } catch (err) { toast(err.message); }
+  });
+}
 
 const MILESTONES = [7, 14, 30, 50, 100, 200, 365];
 
@@ -353,6 +388,8 @@ app.addEventListener("click", (e) => {
   } else if (act === "open-day") {
     state.day = state.selected;
     loadDay();
+  } else if (act === "weigh") {
+    openWeigh();
   } else if (act === "apply-adaptive") {
     applyGoals(state.stats.energy.adaptive.suggested);
   } else if (act === "review") {
@@ -428,12 +465,12 @@ function weightChart(s) {
   if (pts.length < 2) return `<p class="muted small">${pts.length ? "Ещё одно взвешивание — и появится график." : "За этот период взвешиваний нет."}</p>`;
   const W = 320, H = 120, top = 10, bottom = 18, left = 4, right = 4;
   const t0 = new Date(s.from + "T12:00").getTime(), t1 = new Date(s.to + "T12:00").getTime();
-  const kgs = pts.map((p) => p.kg);
+  const kgs = pts.flatMap((p) => [p.kg, p.trend ?? p.kg]);
   const lo = Math.floor(Math.min(...kgs) - 0.5), hi = Math.ceil(Math.max(...kgs) + 0.5);
   const x = (iso) => left + (W - left - right) * (t1 === t0 ? 0.5 : (new Date(iso + "T12:00").getTime() - t0) / (t1 - t0));
   const y = (kg) => top + (H - top - bottom) * (1 - (kg - lo) / (hi - lo));
-  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.date).toFixed(1)},${y(p.kg).toFixed(1)}`).join(" ");
-  const dots = pts.map((p) => `<circle cx="${x(p.date)}" cy="${y(p.kg)}" r="${pts.length > 40 ? 2 : 4}"><title>${esc(shortDate(p.date))}: ${p.kg} кг</title></circle>`).join("");
+  const path = pts.map((p, i) => `${i ? "L" : "M"}${x(p.date).toFixed(1)},${y(p.trend ?? p.kg).toFixed(1)}`).join(" ");
+  const dots = pts.map((p) => `<circle cx="${x(p.date)}" cy="${y(p.kg)}" r="${pts.length > 40 ? 2 : 3}"><title>${esc(shortDate(p.date))}: ${p.kg} кг, тренд ${r1(p.trend ?? p.kg)}</title></circle>`).join("");
   return `<svg class="chart weight" viewBox="0 0 ${W} ${H}" role="img" aria-label="Вес по дням">
     <line class="grid" x1="0" x2="${W}" y1="${y(hi)}" y2="${y(hi)}"/><line class="grid" x1="0" x2="${W}" y1="${y(lo)}" y2="${y(lo)}"/>
     <text x="${W}" y="${y(hi) + 12}" text-anchor="end">${hi} кг</text><text x="${W}" y="${y(lo) - 4}" text-anchor="end">${lo} кг</text>
@@ -447,7 +484,8 @@ function renderStats() {
   const g = s.goals, a = s.avg;
   const sel = s.days.find((d) => d.date === state.selected);
   const todayW = s.weights.find((w) => w.date === s.to);
-  const delta = s.weights.length >= 2 ? r1(s.weights.at(-1).kg - s.weights[0].kg) : null;
+  const tr = (w) => w.trend ?? w.kg;
+  const delta = s.weights.length >= 2 ? r1(tr(s.weights.at(-1)) - tr(s.weights[0])) : null;
   showTabs("reports");
   app.innerHTML = `
     ${topbar("Отчёты", `${shortDate(s.from)} — ${shortDate(s.to)}`, "")}
@@ -465,6 +503,15 @@ function renderStats() {
         ? `<span><b>${esc(dayLabel(sel.date))}</b>: ${r0(sel.kcal)} ккал · Б ${r0(sel.protein)} Ж ${r0(sel.fat)} У ${r0(sel.carbs)}</span><button class="ghost" data-act="open-day">Открыть ›</button>`
         : '<span class="muted">Нажми на столбик, чтобы увидеть день</span>'}</div>
     </div>
+    <div class="card">
+      <div class="row between"><b>Вес</b><span class="muted small">${delta === null ? (s.last_weight ? `последний: ${s.last_weight.kg} кг, ${esc(shortDate(s.last_weight.date))}` : "") : `тренд ${delta > 0 ? "+" : delta < 0 ? "−" : ""}${String(Math.abs(delta)).replace(".", ",")} кг за период`}</span></div>
+      ${weightChart(s)}
+      <p class="muted small" style="margin:6px 0 0">Точки — взвешивания, линия — сглаженный тренд: суточные скачки воды почти не двигают её.</p>
+      <form class="row" id="weight-form" style="margin-top:10px">
+        <input id="weight" type="text" inputmode="decimal" autocomplete="off" placeholder="Вес сегодня, кг" value="${todayW ? todayW.kg : ""}">
+        <button class="primary" data-act="save-weight" type="button">${todayW ? "Обновить" : "Записать"}</button>
+      </form>
+    </div>
     ${energyCard(s)}
     <div class="card">
       <b>БЖУ в среднем за день</b>
@@ -474,14 +521,7 @@ function renderStats() {
       </div>
       <p class="muted small" style="margin:10px 0 0">Среднее считается только по дням, где есть записи.</p>
     </div>
-    <div class="card">
-      <div class="row between"><b>Вес</b><span class="muted small">${delta === null ? (s.last_weight ? `последний: ${s.last_weight.kg} кг, ${esc(shortDate(s.last_weight.date))}` : "") : `${delta > 0 ? "+" : ""}${delta} кг за период`}</span></div>
-      ${weightChart(s)}
-      <form class="row" id="weight-form" style="margin-top:10px">
-        <input id="weight" type="number" step="0.1" min="20" max="400" inputmode="decimal" placeholder="Вес сегодня, кг" value="${todayW ? todayW.kg : ""}">
-        <button class="primary" data-act="save-weight" type="button">${todayW ? "Обновить" : "Записать"}</button>
-      </form>
-    </div>`;
+`;
   $("#weight-form").onsubmit = (e) => { e.preventDefault(); saveWeight(); };
 }
 
@@ -732,7 +772,7 @@ function itemHtml(it, idx) {
     <div class="row between" style="margin-top:6px">
       <div class="grams">
         <button data-step="-10" data-i="${idx}">−</button>
-        <input type="number" inputmode="decimal" min="1" value="${r0(it.grams)}" data-grams="${idx}"> г
+        <input type="number" inputmode="numeric" pattern="[0-9]*" min="1" value="${r0(it.grams)}" data-grams="${idx}"> г
         <button data-step="10" data-i="${idx}">+</button>
       </div>
       <div class="small" data-item-total="${idx}">${itemTotals(it)}</div>
@@ -891,10 +931,10 @@ function openCustomFood(name, barcode = null, note = "") {
     <form id="cf">
       <label>Название</label><input name="name" value="${esc(name)}" required>
       <p class="small muted">Значения на 100 г — обычно есть на упаковке. Продукт сохранится, и его найдут все${barcode ? " — и по штрихкоду тоже" : ""}.</p>
-      <div class="row"><div class="grow"><label>Ккал</label><input name="kcal_100" type="number" step="0.1" inputmode="decimal" required></div>
-      <div class="grow"><label>Белки</label><input name="protein_100" type="number" step="0.1" inputmode="decimal" required></div></div>
-      <div class="row"><div class="grow"><label>Жиры</label><input name="fat_100" type="number" step="0.1" inputmode="decimal" required></div>
-      <div class="grow"><label>Углеводы</label><input name="carbs_100" type="number" step="0.1" inputmode="decimal" required></div></div>
+      <div class="row"><div class="grow"><label>Ккал</label><input name="kcal_100" type="text" inputmode="decimal" autocomplete="off" required></div>
+      <div class="grow"><label>Белки</label><input name="protein_100" type="text" inputmode="decimal" autocomplete="off" required></div></div>
+      <div class="row"><div class="grow"><label>Жиры</label><input name="fat_100" type="text" inputmode="decimal" autocomplete="off" required></div>
+      <div class="grow"><label>Углеводы</label><input name="carbs_100" type="text" inputmode="decimal" autocomplete="off" required></div></div>
       <button class="primary block" style="margin-top:14px">Добавить</button>
     </form>`);
   draft = null; // keep editor handlers quiet while this form is open
@@ -1153,9 +1193,11 @@ function renderProfile(p) {
         <div class="grow"><label>Год рождения</label><input name="birth_year" type="number" inputmode="numeric" value="${p.birth_year ?? ""}" required></div>
       </div>
       <div class="row">
-        <div class="grow"><label>Рост, см</label><input name="height_cm" type="number" inputmode="decimal" value="${p.height_cm ?? ""}" required></div>
-        <div class="grow"><label>Вес, кг</label><input name="weight_kg" type="number" step="0.1" inputmode="decimal" value="${p.weight_kg ?? ""}" required></div>
+        <div class="grow"><label>Рост, см</label><input name="height_cm" type="text" inputmode="decimal" value="${p.height_cm ?? ""}" required></div>
+        <div class="grow"><label>Вес, кг</label><input name="weight_kg" type="text" inputmode="decimal" autocomplete="off" value="${p.weight_kg ?? ""}" required></div>
       </div>
+      <label>Цель по весу, кг <span class="muted">(необязательно)</span></label>
+      <input name="goal_weight_kg" type="text" inputmode="decimal" autocomplete="off" value="${p.goal_weight_kg ?? ""}">
       <label>Активность</label><select name="activity">${opt(p.activity_levels, p.activity)}</select>
       <label>Цель</label><select name="rate_kg_week">${opt(p.rates, p.rate_kg_week)}</select>
       <button class="block" style="margin-top:12px">Рассчитать</button>
@@ -1173,6 +1215,7 @@ function renderProfile(p) {
       renderProfile(await api("/api/profile", { method: "PUT", json: {
         sex: v.sex, birth_year: +v.birth_year, height_cm: +String(v.height_cm).replace(",", "."),
         weight_kg: +String(v.weight_kg).replace(",", "."), activity: +v.activity, rate_kg_week: +v.rate_kg_week,
+        goal_weight_kg: v.goal_weight_kg ? +String(v.goal_weight_kg).replace(",", ".") : null,
       } }));
     } catch (err) { toast(err.message); }
   };

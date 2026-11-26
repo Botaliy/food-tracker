@@ -198,7 +198,7 @@ def test_weight_is_one_per_day_and_private(client, db):
     assert client.put("/api/weight", json={"kg": 80, "date": (today + timedelta(days=1)).isoformat()}).status_code == 400
 
     s = client.get("/api/stats?days=7").json()
-    assert s["weights"] == [{"date": today.isoformat(), "kg": 80.1}]
+    assert s["weights"] == [{"date": today.isoformat(), "kg": 80.1, "trend": 80.1}]
     assert s["last_weight"]["kg"] == 80.1
     assert len(client.get("/api/stats?days=30").json()["weights"]) == 2
 
@@ -697,3 +697,37 @@ def test_evening_text_names_partners():
     title, body = reminders.evening_text(12, False, ["alina"])
     assert "под угрозой" in title and "alina уже записал" in body
     assert "заморозка" in reminders.evening_text(12, True, [])[1]
+
+
+def test_weight_trend_and_goal_eta():
+    from datetime import date, timedelta
+    from app import energy
+    t0 = date(2026, 11, 1)
+    # Losing 0.5 kg a week, with a 1 kg water spike on one day.
+    weights = [(t0 + timedelta(days=k), 80 - 0.5 * k / 7 + (1.0 if k == 20 else 0)) for k in range(0, 26, 2)]
+    trend = energy.weight_trend(weights)
+    by_day = dict(trend)
+    raw_jump = weights[10][1] - weights[9][1]  # day 20 vs day 18: about +0.86 kg
+    trend_jump = by_day[t0 + timedelta(days=20)] - by_day[t0 + timedelta(days=18)]
+    assert raw_jump > 0.8 and trend_jump < 0.25  # the spike barely moves the trend
+    today = t0 + timedelta(days=25)
+    out = energy.weight_outlook(weights, 75, today)
+    assert -0.6 < out["kg_per_week"] < -0.4
+    eta = date.fromisoformat(out["eta"])
+    left = out["trend"] - 75
+    assert 3 < left < 5 and 6 * 7 < (eta - today).days < 12 * 7  # ~4 kg to go at ~0.5 kg a week
+    assert energy.weight_outlook(weights, 85, today)["eta"] is None  # moving away from it
+    assert energy.weight_outlook([(today, 75.1)], 75, today)["eta"] == "reached"
+
+
+def test_day_has_weight_outlook(client):
+    from datetime import timedelta
+    today = _local_today()
+    assert client.get("/api/day").json()["weight"] is None
+    client.put("/api/profile", json={"sex": "f", "birth_year": 1995, "height_cm": 168, "activity": 1.375,
+                                     "rate_kg_week": -0.5, "goal_weight_kg": 60})
+    for k in (14, 7, 0):
+        client.put("/api/weight", json={"kg": 65 - (14 - k) / 14, "date": (today - timedelta(days=k)).isoformat()})
+    w = client.get("/api/day").json()["weight"]
+    assert w["today"] == 64.0 and w["goal"] == 60 and w["kg_per_week"] == -0.5 and w["eta"]
+    assert client.get("/api/profile").json()["goal_weight_kg"] == 60

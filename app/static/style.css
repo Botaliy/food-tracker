@@ -321,3 +321,9 @@ input.item-name:focus { border-color: var(--line); background: var(--card); }
 .onb-dots i.done { background: color-mix(in srgb, var(--accent) 45%, var(--track)); }
 .onb-foot { margin-top: 8px; }
 .onb-foot .ghost-line { margin-top: 8px; }
+
+/* weight line on the day screen */
+button.line-card { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 12px 14px; font-size: 16px; }
+button.line-card .grow > * { display: block; }
+.pill { padding: 4px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.chart.weight circle { opacity: .55; }

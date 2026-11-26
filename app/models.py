@@ -116,6 +116,7 @@ class Profile(Base):
     height_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
     activity: Mapped[float] = mapped_column(Float, default=1.375)  # see app.energy.ACTIVITY_LEVELS
     rate_kg_week: Mapped[float] = mapped_column(Float, default=0.0)  # negative = losing
+    goal_weight_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
     # sha256 of the Shortcut's token: the token itself is shown once and never stored.
     health_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     # Reminders (sent only to devices that subscribed to push).

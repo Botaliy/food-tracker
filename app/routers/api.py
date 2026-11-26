@@ -380,7 +380,21 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "goals": _me(db, user)["goals"],
         "activity": _activity_dict(act),
         "streaks": diary.streaks(db, user, _today(user)),
+        "weight": _weight_outlook(db, user),
     }
+
+
+WEIGHT_OUTLOOK_DAYS = 90
+
+
+def _weight_outlook(db: Session, user: User) -> dict | None:
+    today = _today(user)
+    weights = _weights(db, user, today - timedelta(days=WEIGHT_OUTLOOK_DAYS), today)
+    profile = db.get(Profile, user.id)
+    out = energy.weight_outlook([(w.day, w.kg) for w in weights], profile.goal_weight_kg if profile else None, today)
+    if out is not None:
+        out["today"] = weights[-1].kg if weights[-1].day == today else None
+    return out
 
 
 def _activity_dict(a: Activity | None) -> dict | None:
@@ -484,7 +498,8 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
         "logged_days": len(logged),
         "in_goal_days": sum(1 for r in logged if diary.in_goal(r["kcal"], user.kcal_goal)),
         "streak": diary.streak(db, user, today)[0],
-        "weights": [{"date": w.day.isoformat(), "kg": w.kg} for w in weights],
+        "weights": [{"date": w.day.isoformat(), "kg": w.kg, "trend": round(t, 2)}
+                    for w, (_, t) in zip(weights, energy.weight_trend([(w.day, w.kg) for w in weights]))],
         "last_weight": {"date": last_weight.day.isoformat(), "kg": last_weight.kg} if last_weight else None,
         "energy": _energy(db, user, today, rows),
     }
@@ -572,6 +587,7 @@ def _profile_dict(db: Session, user: User, profile: Profile) -> dict:
         "height_cm": profile.height_cm,
         "activity": profile.activity,
         "rate_kg_week": profile.rate_kg_week,
+        "goal_weight_kg": profile.goal_weight_kg,
         "weight_kg": last_weight.kg if last_weight else None,
         "activity_levels": [{"value": k, "label": v} for k, v in energy.ACTIVITY_LEVELS.items()],
         "rates": [{"value": k, "label": v} for k, v in energy.RATES.items()],
@@ -593,6 +609,7 @@ class ProfileIn(BaseModel):
     activity: float
     rate_kg_week: float
     weight_kg: float | None = Field(None, ge=20, le=400)  # recorded as today's weigh-in when given
+    goal_weight_kg: float | None = Field(None, ge=30, le=300)
 
 
 @router.get("/profile")
@@ -609,6 +626,7 @@ def put_profile(body: ProfileIn, user: User = Depends(auth.current_user), db: Se
     profile = _profile(db, user)
     profile.sex, profile.birth_year, profile.height_cm = body.sex, body.birth_year, body.height_cm
     profile.activity, profile.rate_kg_week = body.activity, body.rate_kg_week
+    profile.goal_weight_kg = body.goal_weight_kg
     if body.weight_kg is not None:
         _upsert_weight(db, user, _today(user), body.weight_kg)
     db.commit()

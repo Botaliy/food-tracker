@@ -6,7 +6,7 @@ ate X a day on average and your weight moved by Y, you spent X - Y * 7700 / days
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 KCAL_PER_KG = 7700  # energy in a kilogram of body weight change, the usual estimate
 
@@ -95,4 +95,43 @@ def adaptive(days: list[DayIntake], weights: list[tuple[date, float]]) -> dict:
         "kg_per_week": round(slope * 7, 2),
         "tdee": round10(intake - slope * KCAL_PER_KG),
     })
+    return out
+
+
+TREND_ALPHA = 0.1  # per day, as in The Hacker's Diet: one weigh-in moves the trend by 10%
+TREND_RATE_DAYS = 28
+
+
+def weight_trend(weights: list[tuple[date, float]]) -> list[tuple[date, float]]:
+    """A smoothed weight per weigh-in: daily water swings fade, the direction stays.
+    A gap of several days counts as several steps of smoothing."""
+    out: list[tuple[date, float]] = []
+    for d, kg in weights:
+        if not out:
+            out.append((d, kg))
+            continue
+        prev_d, prev = out[-1]
+        k = 1 - (1 - TREND_ALPHA) ** max(1, (d - prev_d).days)
+        out.append((d, prev + k * (kg - prev)))
+    return out
+
+
+def weight_outlook(weights: list[tuple[date, float]], goal_kg: float | None, today: date) -> dict | None:
+    """Where weight is heading: the trend, its pace over the last 4 weeks, and when it reaches the goal."""
+    if not weights:
+        return None
+    trend = weight_trend(weights)
+    recent = [(d, kg) for d, kg in weights if (today - d).days < TREND_RATE_DAYS]
+    span = (recent[-1][0] - recent[0][0]).days if len(recent) >= 2 else 0
+    per_week = round(weight_slope(recent) * 7, 2) if span >= 7 else None
+    out = {"last": {"date": weights[-1][0].isoformat(), "kg": weights[-1][1]},
+           "trend": round(trend[-1][1], 1), "kg_per_week": per_week, "goal": goal_kg, "eta": None}
+    left = goal_kg - trend[-1][1] if goal_kg else None
+    if left is not None and abs(left) < 0.3:
+        out["eta"] = "reached"
+    elif left is not None and per_week:
+        if left * per_week > 0 and abs(per_week) >= 0.05:  # moving toward the goal
+            weeks = left / per_week
+            if weeks <= 104:
+                out["eta"] = (today + timedelta(days=round(weeks * 7))).isoformat()
     return out
