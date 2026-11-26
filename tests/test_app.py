@@ -744,8 +744,8 @@ def test_observations_from_two_weeks(client):
             {"name": "Пицца", "grams": 400, "kcal_100": 260, "protein_100": 11, "fat_100": 10, "carbs_100": 30}]})
     found = client.get("/api/insights").json()
     icons = [f["icon"] for f in found]
-    assert "🌙" in icons and "🍳" in icons and "🔎" in icons
-    assert "«Пицца»" in found[icons.index("🔎")]["text"]
+    assert "moon" in icons and "egg" in icons and "search" in icons
+    assert "«Пицца»" in found[icons.index("search")]["text"]
 
 
 def test_suggestions_fit_what_is_left():

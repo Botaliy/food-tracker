@@ -128,7 +128,7 @@ function renderAuth(error = "") {
   const invite = inviteFromUrl();
   $("#tabbar").hidden = true;
   app.innerHTML = `
-    <div class="brand"><div class="brand-ico">🥗</div><h1>${invite ? "Регистрация" : "Вход"}</h1><p class="muted small">Калории и БЖУ по фото еды</p></div>
+    <div class="brand"><div class="brand-ico">${ICONS.leaf}</div><h1>${invite ? "Регистрация" : "Вход"}</h1><p class="muted small">Калории и БЖУ по фото еды</p></div>
     <form class="card" id="auth-form">
       <label>Логин</label>
       <input name="username" autocomplete="username" autocapitalize="none" required>
@@ -157,6 +157,9 @@ function renderAuth(error = "") {
 // ---------- day view ----------
 
 async function loadDay() {
+  leaveProfileHash();
+  showTabs("day");
+  showSkeleton("day");
   state.view = "day";
   try {
     const [dayData, streaks] = await Promise.all([api(`/api/day?date=${state.day}`), api("/api/streaks").catch(() => null)]);
@@ -170,54 +173,127 @@ async function loadDay() {
   }
 }
 
-function bar(value, goal, color) {
+function bar(value, goal, color = "var(--accent)") {
   const pct = goal > 0 ? Math.min(100, (value / goal) * 100) : 0;
-  return `<div class="bar ${value > goal * 1.05 ? "over" : ""}" style="--c:${color}"><i style="width:${pct}%"></i></div>`;
+  return `<div class="bar ${isOver(value, goal) ? "over" : ""}" style="--c:${color}"><i style="width:${pct}%"></i></div>`;
 }
 
-// Stroke icons, 24x24, drawn in currentColor.
+// Stroke icons, 24x24, drawn in currentColor: emoji look different on every platform.
 const svgIcon = (d) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
-const ICON = {
-  diary: svgIcon('<path d="M6 3.5h10.5A2.5 2.5 0 0 1 19 6v14.5H7.5A2.5 2.5 0 0 1 5 18V4.5a1 1 0 0 1 1-1z"/><path d="M5 18a2.5 2.5 0 0 1 2.5-2.5H19M9 8h6"/>'),
-  chart: svgIcon('<path d="M4 20h16M7 16v-5M12 16V6M17 16v-8"/>'),
-  settings: svgIcon('<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>'),
-  left: svgIcon('<path d="M14.5 6l-6 6 6 6"/>'),
-  right: svgIcon('<path d="M9.5 6l6 6-6 6"/>'),
-  plus: svgIcon('<path d="M12 5v14M5 12h14"/>'),
-  user: svgIcon('<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.6 4-5.5 7-5.5s5.8 1.9 7 5.5"/>'),
-  chat: svgIcon('<path d="M4.5 6.5A2.5 2.5 0 0 1 7 4h10a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 17 16h-6l-4.5 3.5V16H7a2.5 2.5 0 0 1-2.5-2.5z"/><path d="M8.5 9h7M8.5 12h4"/>'),
-};
+const ICONS = Object.fromEntries(Object.entries({
+  diary: '<path d="M6 3.5h10.5A2.5 2.5 0 0 1 19 6v14.5H7.5A2.5 2.5 0 0 1 5 18V4.5a1 1 0 0 1 1-1z"/><path d="M5 18a2.5 2.5 0 0 1 2.5-2.5H19M9 8h6"/>',
+  chart: '<path d="M4 20h16M7 16v-5M12 16V6M17 16v-8"/>',
+  settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+  left: '<path d="M14.5 6l-6 6 6 6"/>',
+  right: '<path d="M9.5 6l6 6-6 6"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  minus: '<path d="M5 12h14"/>',
+  close: '<path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/>',
+  up: '<path d="M12 19V5.5M6.5 11L12 5.5l5.5 5.5"/>',
+  undo: '<path d="M9 6.5L5 10.5l4 4"/><path d="M5 10.5h9.5a4.5 4.5 0 0 1 0 9H12"/>',
+  check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
+  clock: '<circle cx="12" cy="12" r="8"/><path d="M12 7.5V12l3 2"/>',
+  user: '<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.6 4-5.5 7-5.5s5.8 1.9 7 5.5"/>',
+  chat: '<path d="M4.5 6.5A2.5 2.5 0 0 1 7 4h10a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 17 16h-6l-4.5 3.5V16H7a2.5 2.5 0 0 1-2.5-2.5z"/><path d="M8.5 9h7M8.5 12h4"/>',
+  leaf: '<path d="M5 19c0-8 5-13.5 14-14 .2 9-5.5 14-14 14z"/><path d="M5 19l7.5-7.5"/>',
+  flame: '<path d="M12 21c-3.9 0-6.5-2.6-6.5-6.2 0-2.9 1.8-5 3.4-6.6.3 1.9 1.2 3 2.3 3.4C11 8.6 12.4 5.4 15 3c.2 3 1.6 4.6 2.7 6.2 1 1.5 1.8 3 1.8 5 0 3.8-3.2 6.8-7.5 6.8z"/>',
+  steps: '<path d="M8 3.5c1.8 0 2.8 2 2.8 4.6 0 2.2-.8 3.9-1.2 5.4H6.4C6 12 5.2 10.3 5.2 8.1 5.2 5.5 6.2 3.5 8 3.5zM6.4 16.5h3.2v1a1.6 1.6 0 0 1-3.2 0z"/><path d="M16 7.5c-1.8 0-2.8 2-2.8 4.6 0 2.2.8 3.9 1.2 5.4h3.2c.4-1.5 1.2-3.2 1.2-5.4 0-2.6-1-4.6-2.8-4.6zM14.4 19.5h3.2v.5a1.6 1.6 0 0 1-3.2 0z"/>',
+  scale: '<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8.5 10.5a5 5 0 0 1 7 0M12 11l1.5-2"/>',
+  drop: '<path d="M12 3.5c3 3.6 6 7 6 10.5a6 6 0 0 1-12 0c0-3.5 3-6.9 6-10.5z"/>',
+  camera: '<path d="M4 8.5a2 2 0 0 1 2-2h2l1.5-2h5l1.5 2h2a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/>',
+  image: '<rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="9.5" r="1.5"/><path d="M20.5 15.5L16 11l-9.5 8.5"/>',
+  barcode: '<path d="M4 7V5.5A1.5 1.5 0 0 1 5.5 4H7M17 4h1.5A1.5 1.5 0 0 1 20 5.5V7M20 17v1.5a1.5 1.5 0 0 1-1.5 1.5H17M7 20H5.5A1.5 1.5 0 0 1 4 18.5V17M8 8v8M11 8v8M14 8v8M16.5 8v8"/>',
+  pencil: '<path d="M15.5 4.5l4 4L9 19H5v-4z"/><path d="M13.5 6.5l4 4"/>',
+  sparkle: '<path d="M11 3.5l1.8 5 5 1.8-5 1.8-1.8 5-1.8-5-5-1.8 5-1.8z"/><path d="M18 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+  search: '<circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/>',
+  bulb: '<path d="M9.5 17.5h5M10.5 20.5h3M12 3.5a6 6 0 0 0-3.5 10.9c.5.4.5.9.5 1.6v1h5v-1c0-.7 0-1.2.5-1.6A6 6 0 0 0 12 3.5z"/>',
+  target: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 12h.01"/>',
+  dumbbell: '<path d="M6.5 7.5v9M17.5 7.5v9M3.5 10v4M20.5 10v4M6.5 12h11"/>',
+  snow: '<path d="M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9M9.5 4.5L12 6l2.5-1.5M9.5 19.5L12 18l2.5 1.5"/>',
+  flag: '<path d="M5.5 21V4M5.5 4.5h12l-2.5 3.5 2.5 3.5h-12"/>',
+  trash: '<path d="M4.5 7h15M9.5 7V4.5h5V7M6.5 7l.8 12a1.5 1.5 0 0 0 1.5 1.4h6.4a1.5 1.5 0 0 0 1.5-1.4l.8-12M10 11v5.5M14 11v5.5"/>',
+  bell: '<path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2h-14z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>',
+  heart: '<path d="M12 19.5s-7.5-4.4-7.5-9.7A4.3 4.3 0 0 1 12 7.2a4.3 4.3 0 0 1 7.5 2.6c0 5.3-7.5 9.7-7.5 9.7z"/>',
+  shield: '<path d="M12 3.5l7 2.5v5.5c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  logout: '<path d="M14 4.5H7A1.5 1.5 0 0 0 5.5 6v12A1.5 1.5 0 0 0 7 19.5h7M10.5 12h9M16.5 8.5l3.5 3.5-3.5 3.5"/>',
+  replay: '<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/>',
+  // Parts of the day for meals without a photo, and the observations from /api/insights.
+  cup: '<path d="M5 9h11v4.5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16M8.5 3.5v2.5M12 3.5v2.5"/>',
+  bowl: '<path d="M4 11h16a8 8 0 0 1-16 0z"/><path d="M9.5 21h5M9 7.5c0-1.5 1-1.5 1-3M13.5 7.5c0-1.5 1-1.5 1-3"/>',
+  plate: '<circle cx="12" cy="12" r="4.8"/><path d="M3.5 4v4.5a1.5 1.5 0 0 0 3 0V4M5 4v16M20.5 4c-1.2 1-1.8 3-1.8 5.5h1.8V20"/>',
+  apple: '<path d="M12 7.5c-1.5-1-3-1.2-4.5-.8C5 7.4 4 10 4.5 13c.6 3.8 3 7 5.2 7 .9 0 1.4-.4 2.3-.4s1.4.4 2.3.4c2.2 0 4.6-3.2 5.2-7 .5-3-.5-5.6-3-6.3-1.5-.4-3-.2-4.5.8z"/><path d="M12 7.5c0-2 1-3.5 3-4"/>',
+  moon: '<path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z"/>',
+  egg: '<path d="M12 3.5c3.3 0 6 5 6 9.5a6 6 0 0 1-12 0c0-4.5 2.7-9.5 6-9.5z"/>',
+  party: '<path d="M4 20l4.5-11 6.5 6.5z"/><path d="M13.5 4.5c.6 1.2.4 2.5-.5 3.5M19.5 10.5c-1.2-.6-2.5-.4-3.5.5M17 3.5h.01M20.5 7h.01M10.5 3.5h.01M20.5 14h.01"/>',
+}).map(([k, d]) => [k, svgIcon(d)]));
+// A server-sent icon key may be unknown to an old cached shell: draw nothing rather than break.
+const iconOf = (key) => (Object.hasOwn(ICONS, key) ? ICONS[key] : "");
 
-function ring(value, goal, color, size, width, inner = "", warnOver = false) {
+// Within 5% of the goal is still "in goal": a few kcal over shouldn't paint the day as a failure.
+const OVER_TOLERANCE = 1.05;
+const isOver = (value, goal) => goal > 0 && value > goal * OVER_TOLERANCE;
+
+// Rings start from what they showed last time (by key), so a re-render animates the change
+// instead of appearing at the final value.
+const ringShown = new Map();
+function ring(key, value, goal, color, size, width, inner = "", warnOver = false) {
   const r = (size - width) / 2, c = 2 * Math.PI * r, mid = size / 2;
   const frac = goal > 0 ? Math.min(1, value / goal) : 0;
-  const over = warnOver && value > goal * 1.05;
+  const over = warnOver && isOver(value, goal);
+  const to = `${(c * frac).toFixed(1)} ${c.toFixed(1)}`;
+  const from = ringShown.get(key) ?? `0 ${c.toFixed(1)}`;
+  ringShown.set(key, to);
   return `<div class="ring" style="width:${size}px;height:${size}px">
     <svg viewBox="0 0 ${size} ${size}" aria-hidden="true">
       <circle class="track" cx="${mid}" cy="${mid}" r="${r}" stroke-width="${width}"/>
       <circle class="val ${over ? "over" : ""}" cx="${mid}" cy="${mid}" r="${r}" stroke-width="${width}" stroke="${color}"
-        stroke-linecap="${frac > 0 ? "round" : "butt"}" stroke-dasharray="${(c * frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${mid} ${mid})"/>
+        stroke-linecap="${frac > 0 ? "round" : "butt"}" style="stroke-dasharray:${from}" data-to="${to}" transform="rotate(-90 ${mid} ${mid})"/>
     </svg>
     <div class="ring-in">${inner}</div>
   </div>`;
 }
 
-function topbar(title, subtitle, buttons) {
+function animateRings(root = app) {
+  const circles = [...root.querySelectorAll("circle[data-to]")];
+  circles.forEach((el) => getComputedStyle(el).strokeDasharray); // commit the start value first
+  requestAnimationFrame(() => circles.forEach((el) => (el.style.strokeDasharray = el.dataset.to)));
+}
+
+function topbar(title, subtitle, buttons, back = "") {
   return `<header class="top">
+    ${back ? `<button class="icon back" data-act="${back}" aria-label="Назад">${ICONS.left}</button>` : ""}
     <div class="grow"><h1>${esc(title)}</h1><div class="muted small">${esc(subtitle)}</div></div>
     <div class="row tight">${buttons}</div>
   </header>`;
+}
+
+// Grey blocks shaped like the screen that is loading, instead of a "Loading…" line.
+function skeleton(kind) {
+  const b = (h, extra = "") => `<div class="skeleton" style="height:${h}px${extra}"></div>`;
+  const head = `<div class="sk-head">${b(30, ";width:46%")}${b(14, ";width:30%;margin-top:8px")}</div>`;
+  const body = {
+    day: `${b(250, ";border-radius:var(--radius)")}<div class="sk-row">${b(72)}${b(72)}${b(72)}</div>${b(16, ";width:36%;margin:22px 4px 10px")}${b(76)}${b(76)}`,
+    reports: `${b(40)}<div class="sk-row">${b(84)}${b(84)}${b(84)}</div>${b(220, ";border-radius:var(--radius)")}${b(180, ";border-radius:var(--radius)")}`,
+    coach: `<div class="sk-chat">${b(64, ";width:78%")}${b(44, ";width:55%;align-self:flex-end")}${b(88, ";width:82%")}</div>`,
+    profile: `${b(300, ";border-radius:var(--radius)")}${b(56, ";border-radius:var(--radius);margin-top:12px")}`,
+  }[kind] || "";
+  return `<div class="sk" aria-busy="true" aria-label="Загрузка">${head}${body}</div>`;
+}
+// Placeholders only when arriving from another screen: a refresh of the same one keeps its content.
+function showSkeleton(view) {
+  if (state.view === view && app.querySelector(".top")) return;
+  app.innerHTML = skeleton(view);
 }
 
 const tabbar = $("#tabbar");
 function showTabs(active) {
   const tab = (id, icon, label) => `<button data-tab="${id}" class="${active === id ? "on" : ""}">${icon}<span>${label}</span></button>`;
   tabbar.innerHTML = `
-    ${tab("day", ICON.diary, "Дневник")}
-    ${tab("reports", ICON.chart, "Отчёты")}
-    <button data-tab="add" class="add" aria-label="Добавить еду">${ICON.plus}</button>
-    ${tab("coach", ICON.chat, "Коуч")}
-    ${tab("profile", ICON.user, "Профиль")}`;
+    ${tab("day", ICONS.diary, "Дневник")}
+    ${tab("reports", ICONS.chart, "Отчёты")}
+    <button data-tab="add" class="add" aria-label="Добавить еду">${ICONS.plus}</button>
+    ${tab("coach", ICONS.chat, "Коуч")}
+    ${tab("profile", ICONS.user, "Профиль")}`;
   tabbar.hidden = false;
 }
 tabbar.addEventListener("click", (e) => {
@@ -232,7 +308,7 @@ tabbar.addEventListener("click", (e) => {
 // Re-render whatever screen is open after something changed underneath it.
 function refreshView() {
   if (state.view === "reports") return loadStats();
-  if (state.view === "profile") return loadProfileView();
+  if (state.view === "profile") return loadProfileView(state.profileSection);
   if (state.view === "onboarding") return renderOnboarding(state.onboardingStep + 1);
   return loadDay();
 }
@@ -245,64 +321,81 @@ function renderDay() {
   const label = dayLabel(state.day);
   const sameWeekday = label !== "Сегодня" && label !== "Вчера";
   showTabs("day");
+  openMeal = null;
   app.innerHTML = `
     ${topbar(sameWeekday ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : label,
       d.toLocaleDateString("ru-RU", sameWeekday ? { weekday: "long" } : { weekday: "long", day: "numeric", month: "long" }),
-      `<button class="icon" data-act="prev" aria-label="Предыдущий день">${ICON.left}</button>
-       <button class="icon" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>${ICON.right}</button>`)}
+      `<button class="icon" data-act="prev" aria-label="Предыдущий день">${ICONS.left}</button>
+       <button class="icon" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>${ICONS.right}</button>`)}
     <div class="card summary">
       <div class="sum-main">
-        ${ring(t.kcal, g.kcal, "var(--accent)", 136, 13,
+        ${ring("kcal", t.kcal, g.kcal, "var(--accent)", 136, 13,
           `<b>${r0(Math.abs(left))}</b><span class="muted">${left >= 0 ? "осталось" : "перебор"}</span>`, true)}
         <div class="sum-stats">
           <div><span class="muted small">Съедено</span><b>${r0(t.kcal)} <small>ккал</small></b></div>
           <div><span class="muted small">Норма</span><b>${g.kcal} <small>ккал</small></b></div>
-          ${activityLine(state.dayData.activity)}
         </div>
       </div>
       <div class="macros">
-        ${[["Белки", t.protein, g.protein, "var(--protein)"], ["Жиры", t.fat, g.fat, "var(--fat)"], ["Углеводы", t.carbs, g.carbs, "var(--carbs)"]]
-          .map(([n, v, goal, c]) => `<div class="macro">${ring(v, goal, c, 62, 7, `<b>${r0(v)}</b>`)}
+        ${[["p", "Белки", t.protein, g.protein, "var(--protein)"], ["f", "Жиры", t.fat, g.fat, "var(--fat)"], ["c", "Углеводы", t.carbs, g.carbs, "var(--carbs)"]]
+          .map(([k, n, v, goal, c]) => `<div class="macro">${ring(k, v, goal, c, 62, 7, `<b>${r0(v)}</b>`)}
             <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
+      ${activityLine(state.dayData.activity)}
     </div>
-    ${isToday ? suggestRow(state.dayData.suggest, g.kcal - t.kcal) : ""}
-    ${isToday ? weightLine(state.dayData.weight) : ""}
-    ${isToday ? waterLine(state.dayData.water) : ""}
-    ${isToday ? myStreaks(state.dayData.streaks) : ""}
-    ${isToday ? streaksRow(state.streaks) : ""}
+    ${isToday ? quickTiles(state.dayData) : ""}
     ${meals.length
       ? `<h3 class="sub">Приёмы пищи</h3>${meals.map(mealCard).join("")}`
-      : `<div class="empty"><div class="empty-ico">📸</div><b>Пока пусто</b>
-          <p>Нажми «+» внизу и сфотографируй еду — посчитаю калории и БЖУ.</p></div>`}`;
+      : `<div class="empty"><div class="empty-ico">${ICONS.camera}</div><b>Пока пусто</b>
+          <p>Нажми «+» внизу и сфотографируй еду — посчитаю калории и БЖУ.</p></div>`}
+    ${isToday ? suggestRow(state.dayData.suggest, g.kcal - t.kcal) : ""}
+    ${isToday ? streaksRow(state.streaks, { others: true }) : ""}`;
+  animateRings();
 }
 
 const fmtInt = (n) => r0(n).toLocaleString("ru-RU");
 
 const kgFmt = (n) => String(r1(n)).replace(".", ",");
 
-function weightLine(w) {
-  if (!w) return `<button class="card line-card" data-act="weigh">⚖️ <span class="grow">Записать вес — покажу тренд и посчитаю реальный расход</span><span class="pill">+</span></button>`;
-  const pace = w.kg_per_week == null ? "" : ` ${w.kg_per_week < 0 ? "↓" : w.kg_per_week > 0 ? "↑" : "→"}${kgFmt(Math.abs(w.kg_per_week))}/нед`;
-  const goal = !w.goal ? "" : w.eta === "reached" ? " · 🎉 цель достигнута"
-    : w.eta ? ` · цель ${kgFmt(w.goal)} к ${new Date(w.eta + "T12:00").toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}` : ` · цель ${kgFmt(w.goal)}`;
-  return `<button class="card line-card" data-act="weigh">⚖️ <span class="grow"><b>${kgFmt(w.today ?? w.last.kg)} кг</b>
-    <span class="muted small">тренд ${kgFmt(w.trend)}${pace}${goal}</span></span>
-    <span class="pill">${w.today != null ? "✎" : "записать"}</span></button>`;
+// One row of small tiles: weight, water, streak. Water drops out when it isn't tracked.
+function quickTiles(day) {
+  const tiles = [weightTile(day.weight), waterTile(day.water), streakTile(day.streaks)].filter(Boolean);
+  return `<div class="qtiles" style="--n:${tiles.length}">${tiles.join("")}</div>`;
+}
+
+const tile = (act, icon, value, caption, { tint = "", label = "", extra = "", on = false } = {}) => `
+  <div class="qt ${tint} ${on ? "on" : ""}">
+    <button class="qt-main" data-act="${act}" ${label ? `aria-label="${esc(label)}"` : ""}>
+      <span class="qt-top"><span class="qt-ico">${icon}</span><b>${value}</b></span>
+      ${caption}
+    </button>${extra}
+  </div>`;
+
+const paceText = (w) => w.kg_per_week == null ? "" : `${w.kg_per_week < 0 ? "↓" : w.kg_per_week > 0 ? "↑" : "→"}${kgFmt(Math.abs(w.kg_per_week))}/нед`;
+
+function weightTile(w) {
+  if (!w) return tile("weigh", ICONS.scale, "Вес", '<span class="qt-cap">взвеситься</span>', { label: "Записать вес" });
+  const kg = w.today ?? w.last.kg;
+  return tile("weigh", ICONS.scale, `${kgFmt(kg)} кг`, `<span class="qt-cap">${paceText(w) || `тренд ${kgFmt(w.trend)}`}</span>`,
+    { label: `Вес ${kgFmt(kg)} кг — записать` });
 }
 
 const GLASS_ML = 250;
 
-function waterLine(w) {
+function waterTile(w) {
   if (!w) return "";
-  const glasses = Math.round(w.ml / GLASS_ML), goal = Math.round(w.goal / GLASS_ML);
-  const cells = Array.from({ length: Math.max(goal, glasses) }, (_, i) => `<i class="${i < glasses ? "on" : ""}"></i>`).join("");
-  return `<div class="card water">
-    <div class="grow"><div>💧 <b>${kgFmt(w.ml / 1000)} л</b> <span class="muted small">из ${kgFmt(w.goal / 1000)} л</span></div>
-      <div class="glasses" aria-hidden="true">${cells}</div></div>
-    <button class="icon-btn" data-act="water-sub" aria-label="Убрать стакан" ${w.ml ? "" : "disabled"}>−</button>
-    <button class="icon-btn primary" data-act="water-add" aria-label="Добавить стакан воды">＋</button>
-  </div>`;
+  const pct = w.goal > 0 ? Math.min(100, (100 * w.ml) / w.goal) : 0;
+  return tile("water-add", ICONS.drop, `${kgFmt(w.ml / 1000)} / ${kgFmt(w.goal / 1000)} л`,
+    `<span class="qt-bar"><i style="width:${pct}%"></i></span>`,
+    { tint: "water", label: "Добавить стакан воды", extra: `<button class="qt-more" data-act="water-sheet" aria-label="Вода за сегодня: убрать или добавить стакан">${ICONS.minus}</button>` });
+}
+
+function streakTile(st) {
+  if (!st) return "";
+  const m = st.next_milestone;
+  const cap = st.frozen ? "заморозка спасла" : st.days && !st.today ? "ждёт записи" : m && st.days ? `до ${m}: ещё ${m - st.days}` : st.days ? "дней подряд" : "начни серию";
+  return tile("streak", ICONS.flame, `${st.days} ${plural(st.days, "день", "дня", "дней")}`, `<span class="qt-cap">${cap}</span>`,
+    { tint: "streak", label: `Серия ${st.days} ${plural(st.days, "день", "дня", "дней")} — подробнее`, on: st.today && st.days > 0 });
 }
 
 async function addWater(delta) {
@@ -311,7 +404,26 @@ async function addWater(delta) {
     const y = window.scrollY;
     renderDay();
     window.scrollTo(0, y);
+    if ($("#water-sheet")) renderWaterSheet();
   } catch (err) { toast(err.message); }
+}
+
+// −/+ for the day's water: the tile itself only adds, this is where a glass comes off.
+function renderWaterSheet() {
+  const w = state.dayData?.water;
+  if (!w) return closeSheet();
+  const glasses = Math.round(w.ml / GLASS_ML), goal = Math.round(w.goal / GLASS_ML);
+  const cells = Array.from({ length: Math.max(goal, glasses) }, (_, i) => `<i class="${i < glasses ? "on" : ""}"></i>`).join("");
+  const html = `
+    <div class="row between"><h2>Вода сегодня</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    <div class="card water" id="water-sheet">
+      <div class="grow"><div><b>${kgFmt(w.ml / 1000)} л</b> <span class="muted small">из ${kgFmt(w.goal / 1000)} л · стакан ${GLASS_ML} мл</span></div>
+        <div class="glasses" aria-hidden="true">${cells}</div></div>
+      <button class="icon-btn" data-water="-1" aria-label="Убрать стакан" ${w.ml ? "" : "disabled"}>${ICONS.minus}</button>
+      <button class="icon-btn primary" data-water="1" aria-label="Добавить стакан воды">${ICONS.plus}</button>
+    </div>
+    <p class="muted small">Цель и отключение — в «Профиль → Вода».</p>`;
+  if ($("#water-sheet")) sheetBody.innerHTML = html; else openSheet(html);
 }
 
 function suggestRow(list, left) {
@@ -325,8 +437,12 @@ function suggestRow(list, left) {
 
 function openWeigh() {
   const w = state.dayData?.weight;
+  const goal = !w?.goal ? "" : w.eta === "reached" ? " · цель достигнута"
+    : w.eta ? ` · цель ${kgFmt(w.goal)} к ${new Date(w.eta + "T12:00").toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}` : ` · цель ${kgFmt(w.goal)}`;
   openSheet(`
-    <div class="row between"><h2>Вес сегодня</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+    <div class="row between"><h2>Вес сегодня</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    ${w ? `<p class="small" style="margin:0 0 10px">Тренд <b>${kgFmt(w.trend)} кг</b> ${paceText(w)}<span class="muted">${goal}</span></p>`
+      : '<p class="muted small" style="margin:0 0 10px">Запиши вес — покажу тренд и посчитаю реальный расход.</p>'}
     <form id="weigh-form" class="row">
       <input id="weigh-kg" type="text" inputmode="decimal" autocomplete="off" placeholder="кг" value="${w?.today ?? w?.last?.kg ?? ""}" autofocus>
       <button class="primary">Сохранить</button>
@@ -347,16 +463,28 @@ function openWeigh() {
 
 const MILESTONES = [7, 14, 30, 50, 100, 200, 365];
 
-function myStreaks(st) {
-  if (!st) return "";
-  const chips = [];
-  if (st.days) chips.push(`<span class="chip ${st.today ? "me" : ""}" title="Дней подряд с записями">🔥 ${st.days} ${plural(st.days, "день", "дня", "дней")}</span>`);
-  if (st.frozen) chips.push('<span class="chip" title="Один пропуск в неделю не обрывает серию">❄️ заморозка спасла день</span>');
-  if (st.in_goal) chips.push(`<span class="chip" title="Дней подряд в коридоре 85–105% нормы">🎯 ${st.in_goal} в норме</span>`);
-  if (st.protein) chips.push(`<span class="chip" title="Дней подряд с белком от 90% нормы">💪 ${st.protein} с белком</span>`);
-  if (!chips.length) return "";
-  const next = st.next_milestone && st.days ? `<span class="muted small">до ${st.next_milestone}: ${st.next_milestone - st.days}</span>` : "";
-  return `<div class="streaks">${chips.join("")}${next}</div>`;
+// Everything about runs that used to sit inline on the day screen.
+function openStreak() {
+  const st = state.dayData?.streaks;
+  if (!st) return;
+  const days = (n) => `${n} ${plural(n, "день", "дня", "дней")}`;
+  const m = st.next_milestone;
+  const line = (icon, text, hint = "") => `<li><span class="li-ico">${icon}</span><span>${text}${hint ? `<span class="muted small">${hint}</span>` : ""}</span></li>`;
+  const freeze = st.frozen
+    ? line(ICONS.snow, `Заморозка спасла ${esc(dayLabel(st.frozen).toLowerCase())}`, "Следующая — через неделю после неё")
+    : line(ICONS.snow, st.freeze_ready ? "Заморозка готова" : "Заморозка уже потрачена", "Один пропуск в неделю не обрывает серию");
+  openSheet(`
+    <div class="row between"><h2>Серия</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    <div class="card">
+      <div class="streak-big"><b>${days(st.days)}</b> <span class="muted">подряд с записями${st.today ? "" : " · сегодня ещё пусто"}</span></div>
+      ${m && st.days ? `<div class="need"><span>До ${days(m)}</span><span>ещё ${m - st.days}</span></div>${bar(st.days, m)}` : ""}
+      <ul class="insights">
+        ${freeze}
+        ${line(ICONS.target, `${days(st.in_goal)} в норме`, "Подряд в коридоре 85–105% нормы")}
+        ${line(ICONS.dumbbell, `${days(st.protein)} с белком`, "Подряд с белком от 90% нормы")}
+      </ul>
+    </div>
+    ${streaksRow(state.streaks) || '<p class="muted small">Общие серии с друзьями включаются в «Профиль → Уведомления».</p>'}`);
 }
 
 // A milestone reached today gets a moment, once.
@@ -367,44 +495,147 @@ function celebrate(st) {
     if (localStorage.getItem(key) === String(st.days)) return;
     localStorage.setItem(key, String(st.days));
   } catch { return; }
-  setTimeout(() => toast(`🎉 ${st.days} ${plural(st.days, "день", "дня", "дней")} подряд! Так держать`), 400);
+  setTimeout(() => toast(`${st.days} ${plural(st.days, "день", "дня", "дней")} подряд! Так держать`), 400);
 }
 
-function streaksRow(st) {
+// Shared streaks. On the day screen only when someone besides me takes part.
+function streaksRow(st, { others = false } = {}) {
   if (!st?.joined || !st.people.length) return "";
+  if (others && !st.people.some((p) => !p.me)) return "";
   const chips = st.people.map((p) => `<span class="chip ${p.me ? "me" : ""}" title="${p.today ? "сегодня записано" : "сегодня ещё пусто"}">
-    ${p.today ? "✅" : "⏳"} ${esc(p.me ? "ты" : p.name)} <b>${p.streak}</b></span>`).join("");
-  return `<div class="streaks"><span class="streaks-title">🔥 Серии</span>${chips}
+    <span class="chip-ico ${p.today ? "ok" : ""}">${p.today ? ICONS.check : ICONS.clock}</span>${esc(p.me ? "ты" : p.name)} <b>${p.streak}</b></span>`).join("");
+  return `<div class="streaks"><span class="streaks-title">Общие серии</span>${chips}
     ${st.people.length === 1 ? '<span class="muted small">Пока участвуешь только ты</span>' : ""}</div>`;
 }
 
+// Footer of the summary card: each value stays whole, the pair may wrap between items.
 function activityLine(a) {
   if (!a || (a.active_kcal == null && a.steps == null)) return "";
-  const parts = [a.active_kcal != null ? `🔥 ${fmtInt(a.active_kcal)} ккал` : "", a.steps != null ? `👣 ${fmtInt(a.steps)}` : ""].filter(Boolean);
-  return `<div class="move"><span class="muted small">Движение</span><span>${parts.join(" · ")}</span></div>`;
+  const item = (icon, text) => `<span class="move-item"><span class="move-ico">${icon}</span>${text}</span>`;
+  return `<div class="move" aria-label="Движение">
+    ${a.active_kcal != null ? item(ICONS.flame, `<b>${fmtInt(a.active_kcal)}</b> ккал активности`) : ""}
+    ${a.steps != null ? item(ICONS.steps, `<b>${fmtInt(a.steps)}</b> ${plural(r0(a.steps), "шаг", "шага", "шагов")}`) : ""}
+  </div>`;
 }
 
-const PART_OF_DAY =[[5, "🌙", "Перекус"], [11, "🍳", "Завтрак"], [16, "🍲", "Обед"], [22, "🍽️", "Ужин"], [24, "🌙", "Перекус"]];
+const PART_OF_DAY = [[5, "moon", "Перекус"], [11, "cup", "Завтрак"], [16, "bowl", "Обед"], [22, "plate", "Ужин"], [24, "apple", "Перекус"]];
 
+// The card slides over a delete button: swipe left reveals it, the editor keeps its own.
 function mealCard(m) {
   const at = new Date(m.eaten_at);
   const time = at.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   const [, icon, name] = PART_OF_DAY.find(([until]) => at.getHours() < until);
-  return `<div class="card meal" data-meal="${m.id}">
-    <div class="meal-ico">${icon}</div>
-    <div class="grow">
-      <div class="meal-head"><span class="meal-title">${esc(m.title || name)}</span><span class="meal-kcal">${r0(m.totals.kcal)} <small>ккал</small></span></div>
-      <div class="meal-items">${m.items.map((i) => `${esc(i.name)} ${r0(i.grams)} г`).join(" · ")}</div>
-      <div class="meal-meta">${time} · <i style="--c:var(--protein)"></i>Б ${r0(m.totals.protein)} <i style="--c:var(--fat)"></i>Ж ${r0(m.totals.fat)} <i style="--c:var(--carbs)"></i>У ${r0(m.totals.carbs)}</div>
+  return `<div class="meal-wrap">
+    <button class="meal-del" data-meal-del="${m.id}" aria-label="Удалить приём пищи" tabindex="-1">${ICONS.trash}<span>Удалить</span></button>
+    <div class="card meal" data-meal="${m.id}" role="button" tabindex="0" aria-label="${esc(m.title || name)}, ${r0(m.totals.kcal)} ккал — изменить">
+      <div class="meal-ico">${ICONS[icon]}</div>
+      <div class="grow">
+        <div class="meal-head"><span class="meal-title">${esc(m.title || name)}</span><span class="meal-kcal">${r0(m.totals.kcal)} <small>ккал</small></span></div>
+        <div class="meal-items">${m.items.map((i) => `${esc(i.name)} ${r0(i.grams)} г`).join(" · ")}</div>
+        <div class="meal-meta">${time} · <i style="--c:var(--protein)"></i>Б ${r0(m.totals.protein)} <i style="--c:var(--fat)"></i>Ж ${r0(m.totals.fat)} <i style="--c:var(--carbs)"></i>У ${r0(m.totals.carbs)}</div>
+      </div>
     </div>
   </div>`;
 }
+
+// The one delete flow, from the editor and from the swipe: confirm, delete, reload the day.
+async function deleteMeal(id) {
+  if (!confirm("Удалить этот приём пищи?")) return false;
+  try {
+    await api(`/api/meals/${id}`, { method: "DELETE" });
+    loadDay();
+    return true;
+  } catch (err) { toast(err.message); return false; }
+}
+
+// ---------- day gestures: swipe between days, swipe a meal to delete ----------
+
+const SWIPE_MIN = 60, MEAL_OPEN = -88;
+let touch = null, openMeal = null;
+
+function closeOpenMeal() {
+  if (!openMeal) return;
+  openMeal.style.transform = "";
+  openMeal.closest(".meal-wrap")?.classList.remove("open");
+  openMeal = null;
+}
+
+app.addEventListener("touchstart", (e) => {
+  if (state.view !== "day" || e.touches.length !== 1) { touch = null; return; }
+  const p = e.touches[0];
+  // Leave the screen edges to the system back gesture.
+  if (p.clientX < 20 || p.clientX > innerWidth - 20) { touch = null; return; }
+  const meal = e.target.closest(".meal");
+  touch = { x: p.clientX, y: p.clientY, t: Date.now(), meal, base: meal && meal === openMeal ? MEAL_OPEN : 0, axis: null, dx: 0 };
+}, { passive: true });
+
+app.addEventListener("touchmove", (e) => {
+  if (!touch) return;
+  const p = e.touches[0];
+  const dx = p.clientX - touch.x, dy = p.clientY - touch.y;
+  // Decide once, after a few pixels: vertical movement is a scroll and is left alone.
+  if (!touch.axis && Math.hypot(dx, dy) > 8) touch.axis = Math.abs(dx) > Math.abs(dy) * 1.2 ? "x" : "y";
+  if (touch.axis !== "x") return;
+  touch.dx = dx;
+  if (touch.meal) {
+    touch.meal.classList.add("dragging");
+    touch.meal.style.transform = `translateX(${Math.max(MEAL_OPEN - 24, Math.min(0, touch.base + dx))}px)`;
+  }
+}, { passive: true });
+
+app.addEventListener("touchend", () => {
+  const t = touch;
+  touch = null;
+  if (!t || t.axis !== "x") return;
+  if (t.meal) {
+    t.meal.classList.remove("dragging");
+    const pos = t.base + t.dx;
+    if (pos < MEAL_OPEN / 2) {
+      if (openMeal !== t.meal) closeOpenMeal();
+      openMeal = t.meal;
+      openMeal.style.transform = `translateX(${MEAL_OPEN}px)`;
+      openMeal.closest(".meal-wrap").classList.add("open");
+    } else {
+      t.meal.style.transform = "";
+      if (openMeal === t.meal) closeOpenMeal();
+    }
+    t.meal.dataset.swiped = "1"; // the click that follows a drag isn't a tap
+    setTimeout(() => delete t.meal.dataset.swiped, 50);
+    return;
+  }
+  if (Math.abs(t.dx) < SWIPE_MIN || Date.now() - t.t > 700) return;
+  const btn = $(`[data-act="${t.dx < 0 ? "next" : "prev"}"]`, app);
+  if (btn && !btn.disabled) { closeOpenMeal(); btn.click(); }
+});
+
+app.addEventListener("touchcancel", () => {
+  if (touch?.meal) { touch.meal.classList.remove("dragging"); touch.meal.style.transform = touch.meal === openMeal ? `translateX(${MEAL_OPEN}px)` : ""; }
+  touch = null;
+});
+
+// Long press on the water tile opens the −/+ sheet, like its small button does.
+let pressTimer = null, pressFired = false;
+app.addEventListener("pointerdown", (e) => {
+  if (!e.target.closest('[data-act="water-add"]')) return;
+  pressFired = false;
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(() => { pressFired = true; navigator.vibrate?.(15); renderWaterSheet(); }, 500);
+});
+["pointerup", "pointercancel", "pointerleave"].forEach((ev) => app.addEventListener(ev, () => clearTimeout(pressTimer)));
+app.addEventListener("touchmove", () => clearTimeout(pressTimer), { passive: true });
+app.addEventListener("contextmenu", (e) => { if (e.target.closest('[data-act="water-add"]')) e.preventDefault(); });
 
 app.addEventListener("click", (e) => {
   const act = e.target.closest("[data-act]")?.dataset.act;
   const mealEl = e.target.closest("[data-meal]");
   const sug = e.target.closest("[data-suggest]");
+  const del = e.target.closest("[data-meal-del]");
   if (sug) return repeatMeal(state.dayData.suggest[Number(sug.dataset.suggest)]);
+  if (del) return deleteMeal(Number(del.dataset.mealDel)).then((done) => { if (!done) closeOpenMeal(); });
+  if (mealEl?.dataset.swiped) return;
+  // A tap anywhere while a card shows its delete button just closes it.
+  if (openMeal) { closeOpenMeal(); if (mealEl) return; }
+  if (act === "water-add" && pressFired) { pressFired = false; return; } // the long press already opened the sheet
   if (act === "prev" || act === "next") {
     const d = new Date(state.day + "T12:00");
     d.setDate(d.getDate() + (act === "prev" ? -1 : 1));
@@ -431,8 +662,14 @@ app.addEventListener("click", (e) => {
     openWeigh();
   } else if (act === "water-add") {
     addWater(GLASS_ML);
-  } else if (act === "water-sub") {
-    addWater(-GLASS_ML);
+  } else if (act === "water-sheet") {
+    renderWaterSheet();
+  } else if (act === "streak") {
+    openStreak();
+  } else if (act === "profile-back") {
+    profileBack();
+  } else if (act?.startsWith("profile:")) {
+    openProfileSection(act.slice(8));
   } else if (act === "apply-adaptive") {
     applyGoals(state.stats.energy.adaptive.suggested);
   } else if (act === "review") {
@@ -448,6 +685,9 @@ app.addEventListener("click", (e) => {
     if (meal) openEditor({ id: meal.id, title: meal.title, eaten_at: meal.eaten_at, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
   }
 });
+app.addEventListener("keydown", (e) => {
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches(".meal[data-meal]")) { e.preventDefault(); e.target.click(); }
+});
 
 // ---------- reports ----------
 
@@ -459,6 +699,9 @@ const plural = (n, one, few, many) => {
 };
 
 async function loadStats() {
+  leaveProfileHash();
+  showTabs("reports");
+  showSkeleton("reports");
   state.view = "reports";
   try {
     const [stats, review, found] = await Promise.all([
@@ -483,14 +726,18 @@ function kcalChart(s) {
   const y = (v) => top + (H - top - bottom) * (1 - v / max);
   const slot = W / n, gap = n > 40 ? 1 : 2, bw = Math.min(28, Math.max(1, slot - gap));
   const rx = Math.min(4, bw / 2);
+  // Rounded top, square base: a rounded rect plus a square patch over its bottom corners.
+  const column = (x, yTop, h, cls = "") => `<rect x="${x}" y="${yTop}" width="${bw}" height="${h}" rx="${Math.min(rx, h / 2)}" class="${cls}"/>
+      <rect x="${x}" y="${yTop + h - Math.min(h, rx)}" width="${bw}" height="${Math.min(h, rx)}" class="${cls}"/>`;
+  const base = H - bottom, yGoal = y(goal);
   const bars = s.days.map((d, i) => {
     const x = i * slot + (slot - bw) / 2;
-    const over = d.kcal > goal * 1.05;
     const sel = d.date === state.selected;
-    const h = d.kcal > 0 ? Math.max(2, H - bottom - y(d.kcal)) : 0;
-    // Rounded top, square base: a rounded rect plus a square patch over its bottom corners.
-    const mark = h ? `<rect x="${x}" y="${H - bottom - h}" width="${bw}" height="${h}" rx="${rx}" class="${over ? "over" : ""}"/>
-      <rect x="${x}" y="${H - bottom - Math.min(h, rx)}" width="${bw}" height="${Math.min(h, rx)}" class="${over ? "over" : ""}"/>` : "";
+    const h = d.kcal > 0 ? Math.max(2, base - y(d.kcal)) : 0;
+    // Over the tolerance only the part above the goal line changes colour: the day still had its norm.
+    const mark = !h ? "" : isOver(d.kcal, goal)
+      ? `<rect x="${x}" y="${yGoal}" width="${bw}" height="${base - yGoal}"/>${column(x, base - h, yGoal - (base - h), "over")}`
+      : column(x, base - h, h);
     return `<g class="b ${sel ? "sel" : ""}" data-act="bar" data-date="${d.date}">
       <rect class="hit" x="${i * slot}" y="0" width="${slot}" height="${H}"/>${mark}</g>`;
   }).join("");
@@ -590,7 +837,8 @@ function energyCard(s) {
   }
   const extra = [
     e.formula ? `По формуле: ~${fmtInt(e.formula.tdee)} ккал` : "",
-    e.activity ? `Часы: ${e.activity.active_kcal != null ? `🔥 ${fmtInt(e.activity.active_kcal)} ккал` : ""}${e.activity.active_kcal != null && e.activity.steps != null ? " · " : ""}${e.activity.steps != null ? `👣 ${fmtInt(e.activity.steps)} шагов` : ""} в среднем за ${e.activity.days} ${plural(e.activity.days, "день", "дня", "дней")}` : "",
+    e.activity ? `Часы: ${[e.activity.active_kcal != null ? `${fmtInt(e.activity.active_kcal)} ккал активности` : "",
+      e.activity.steps != null ? `${fmtInt(e.activity.steps)} ${plural(r0(e.activity.steps), "шаг", "шага", "шагов")}` : ""].filter(Boolean).join(" · ")} в среднем за ${e.activity.days} ${plural(e.activity.days, "день", "дня", "дней")}` : "",
   ].filter(Boolean);
   return `<div class="card">
     <b>Расход энергии</b>
@@ -602,7 +850,7 @@ function energyCard(s) {
 function insightsCard(list) {
   if (!list?.length) return "";
   return `<div class="card"><b>Наблюдения за 2 недели</b>
-    <ul class="insights">${list.map((i) => `<li><span>${i.icon}</span><span>${esc(i.text)}</span></li>`).join("")}</ul></div>`;
+    <ul class="insights">${list.map((i) => `<li><span class="li-ico">${iconOf(i.icon)}</span><span>${esc(i.text)}</span></li>`).join("")}</ul></div>`;
 }
 
 function reviewCard() {
@@ -620,7 +868,7 @@ function reviewCard() {
       <button class="primary block" data-act="review">Получить обзор</button>`;
   }
   return `<div class="card review">
-    <div class="row between"><b>✨ Обзор недели</b>${r && !state.reviewBusy ? `<span class="muted small">${esc(dayLabel(r.date))}</span>` : ""}</div>
+    <div class="row between"><b class="with-ico">${ICONS.sparkle}Обзор недели</b>${r && !state.reviewBusy ? `<span class="muted small">${esc(dayLabel(r.date))}</span>` : ""}</div>
     ${body}
     ${state.reviewError ? `<div class="error">${esc(state.reviewError)}</div>` : ""}
   </div>`;
@@ -659,20 +907,20 @@ function openAdd() {
   const stash = stashedDraft();
   const stashKcal = stash ? r0(totalsOf(stash.draft.items).kcal) : 0;
   openSheet(`
-    <div class="row between"><h2>Что съел?</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
-    ${stash ? `<div class="resume"><button class="grow" id="resume">↩️ Вернуться к черновику: ${esc(stash.draft.title || "без названия")} · ${stashKcal} ккал</button>
-      <button class="ghost" id="resume-drop" aria-label="Выбросить черновик">✕</button></div>` : ""}
+    <div class="row between"><h2>Что съел?</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    ${stash ? `<div class="resume"><button class="grow with-ico" id="resume">${ICONS.undo}<span>Вернуться к черновику: ${esc(stash.draft.title || "без названия")} · ${stashKcal} ккал</span></button>
+      <button class="ghost" id="resume-drop" aria-label="Выбросить черновик">${ICONS.close}</button></div>` : ""}
     <div class="row add-search">
-      <input id="add-q" type="search" placeholder="🔍 Найти продукт" autocomplete="off" enterkeyhint="search">
-      <button id="scan" aria-label="Сканировать штрихкод">🏷️</button>
+      <span class="search-field">${ICONS.search}<input id="add-q" type="search" placeholder="Найти продукт" aria-label="Найти продукт" autocomplete="off" enterkeyhint="search"></span>
+      <button id="scan" aria-label="Сканировать штрихкод">${ICONS.barcode}</button>
     </div>
     <div class="search-results" id="add-results"></div>
     <div class="pick">
-      <label class="btn">📷<span>Сфотографировать</span><input type="file" accept="image/*" capture="environment" data-photo></label>
-      <label class="btn">🖼️<span>Из галереи</span><input type="file" accept="image/*" data-photo></label>
+      <label class="btn"><span class="pick-ico">${ICONS.camera}</span><span>Сфотографировать</span><input type="file" accept="image/*" capture="environment" data-photo></label>
+      <label class="btn"><span class="pick-ico">${ICONS.image}</span><span>Из галереи</span><input type="file" accept="image/*" data-photo></label>
     </div>
     <details class="describe" id="describe">
-      <summary>✏️ Описать словами или уточнить к фото</summary>
+      <summary class="with-ico">${ICONS.pencil}Описать словами или уточнить к фото</summary>
       <textarea id="note" placeholder="Например: 2 яйца и тост с маслом. К фото: рис 150 г, жарено на масле"></textarea>
       <button class="primary block" id="recognize" style="margin-top:8px">Посчитать</button>
     </details>
@@ -698,7 +946,7 @@ async function loadRecent() {
           <span class="small muted">${m.title ? esc(m.items.map((i) => `${i.name} ${r0(i.grams)} г`).join(" · ")) : ""}</span></span>
         <span class="small"><b>${r0(m.totals.kcal)}</b> ккал${m.count > 1 ? `<br><span class="muted">×${m.count}</span>` : ""}</span>
       </button>
-      <button class="recent-edit" data-recent-edit="${j}" aria-label="Изменить перед записью">✎</button>
+      <button class="recent-edit" data-recent-edit="${j}" aria-label="Изменить перед записью">${ICONS.pencil}</button>
     </div>`).join("");
 }
 
@@ -737,10 +985,12 @@ sheetBody.addEventListener("change", async (e) => {
 
 sheetBody.addEventListener("click", async (e) => {
   if (e.target.closest("[data-close]")) return closeSheet();
+  const water = e.target.closest("[data-water]");
+  if (water) return addWater(Number(water.dataset.water) * GLASS_ML);
   if (e.target.id === "manual") return openEditor({ title: "", items: [], comment: "" });
   if (e.target.closest("#scan")) return openScanner();
-  if (e.target.id === "resume") { const st = stashedDraft(); if (st) openEditor(st.draft); return; }
-  if (e.target.id === "resume-drop") { dropStash(); e.target.closest(".resume").remove(); return; }
+  if (e.target.closest("#resume")) { const st = stashedDraft(); if (st) openEditor(st.draft); return; }
+  if (e.target.closest("#resume-drop")) { dropStash(); e.target.closest(".resume").remove(); return; }
   const rec = e.target.closest("[data-recent]");
   if (rec) { rec.disabled = true; return logAgain(recentMeals[Number(rec.dataset.recent)]); }
   const recEdit = e.target.closest("[data-recent-edit]");
@@ -750,7 +1000,7 @@ sheetBody.addEventListener("click", async (e) => {
     const f = addResults[Number(found.dataset.addFound)];
     return openEditor({ title: "", items: [{ ...f, grams: r0(f.last_grams || 100), options: [f] }], comment: "" });
   }
-  if (e.target.dataset.addCustom) return openCustomFood($("#add-q").value.trim());
+  if (e.target.closest("[data-add-custom]")) return openCustomFood($("#add-q").value.trim());
   if (e.target.id === "recognize") recognizeNow();
 });
 
@@ -819,7 +1069,7 @@ function itemHtml(it, idx) {
           ${r0(it.kcal_100)} ккал/100 г
         </div>
       </div>
-      <button class="ghost danger" data-del="${idx}" aria-label="Убрать">✕</button>
+      <button class="ghost danger" data-del="${idx}" aria-label="Убрать">${ICONS.close}</button>
     </div>
     <div class="row between" style="margin-top:6px">
       <div class="grams">
@@ -841,14 +1091,14 @@ function itemTotals(it) {
 
 function renderEditor() {
   openSheet(`
-    <div class="row between"><h2>${draft.id ? "Редактирование" : "Проверь и поправь"}</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+    <div class="row between"><h2>${draft.id ? "Редактирование" : "Проверь и поправь"}</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
     <div class="when">
       ${MEAL_TYPES.map(([name]) => `<button class="chip-btn ${(draft.title || typeOf(draft.time)) === name ? "on" : ""}" data-type="${name}">${name}</button>`).join("")}
       <input type="time" id="time" value="${draft.time}" aria-label="Время">
     </div>
     <input id="title" value="${esc(draft.title)}" placeholder="Название (необязательно)">
-    ${draft.comment ? `<p class="small muted">💡 ${esc(draft.comment)}</p>` : ""}
-    ${draft.personal_hints ? '<p class="small muted">🎯 Учтены твои прошлые правки порций</p>' : ""}
+    ${draft.comment ? `<p class="small muted note">${ICONS.bulb}<span>${esc(draft.comment)}</span></p>` : ""}
+    ${draft.personal_hints ? `<p class="small muted note">${ICONS.target}<span>Учтены твои прошлые правки порций</span></p>` : ""}
     <div class="card" style="margin-top:10px" id="items">${draft.items.map(itemHtml).join("") || '<p class="muted small">Добавь продукты через поиск ниже</p>'}</div>
     <div class="card">
       <input id="food-q" placeholder="Добавить продукт: поиск (рус./англ.)" autocomplete="off">
@@ -911,7 +1161,7 @@ function searchFoodsInto(q, sel, where) {
       const attr = where === "add" ? "data-add-found" : "data-add-food";
       box.innerHTML = res.map((f, j) =>
         `<button ${attr}="${j}">${esc(f.name)} <span class="muted">${r0(f.kcal_100)} ккал/100 г${f.last_grams ? ` · обычно ${r0(f.last_grams)} г` : ""}</span></button>`).join("")
-        + `<button ${where === "add" ? "data-add-custom" : "data-custom"}="1">＋ Свой продукт «${esc(q)}»</button>`;
+        + `<button class="with-ico" ${where === "add" ? "data-add-custom" : "data-custom"}="1">${ICONS.plus}Свой продукт «${esc(q)}»</button>`;
     } catch (err) { box.innerHTML = `<div class="error">${esc(err.message)}</div>`; }
   }, 250);
 }
@@ -946,11 +1196,8 @@ sheetBody.addEventListener("click", async (e) => {
   } else if (t.id === "repeat") {
     repeatMeal(draft);
   } else if (t.id === "delete") {
-    if (!confirm("Удалить этот приём пищи?")) return;
-    try {
-      await api(`/api/meals/${draft.id}`, { method: "DELETE" });
-      draft = null; closeSheet(); loadDay();
-    } catch (err) { toast(err.message); }
+    const id = draft.id;
+    if (await deleteMeal(id) && draft?.id === id) { draft = null; closeSheet(); }
   }
 });
 
@@ -978,7 +1225,7 @@ async function saveDraft(btn) {
 function openCustomFood(name, barcode = null, note = "") {
   const back = draft;
   openSheet(`
-    <div class="row between"><h2>Свой продукт</h2><button class="ghost" id="cf-back">${back ? "←" : "✕"}</button></div>
+    <div class="row between"><h2>Свой продукт</h2><button class="ghost" id="cf-back" aria-label="${back ? "Назад" : "Закрыть"}">${back ? ICONS.left : ICONS.close}</button></div>
     ${note ? `<p class="small">${esc(note)}</p>` : ""}
     <form id="cf">
       <label>Название</label><input name="name" value="${esc(name)}" required>
@@ -1066,7 +1313,7 @@ async function frameReader() {
 async function openScanner() {
   const live = !!navigator.mediaDevices?.getUserMedia;
   openSheet(`
-    <div class="row between"><h2>Штрихкод</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+    <div class="row between"><h2>Штрихкод</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
     ${live ? '<div class="scan-box"><video id="scan-video" playsinline muted autoplay></video><i class="scan-line"></i></div><p class="small muted center">Наведи камеру на штрихкод</p>' : ""}
     <form id="code-form" class="row" style="margin-top:8px">
       <input name="code" inputmode="numeric" autocomplete="off" placeholder="${live ? "Или введи цифры под штрихкодом" : "Цифры под штрихкодом"}" required>
@@ -1120,43 +1367,126 @@ async function findBarcode(raw) {
 
 // ---------- settings & admin ----------
 
-async function loadProfileView() {
-  state.view = "profile";
-  try { state.me = await api("/api/me"); } catch (err) { if (err.status === 401) return renderAuth(); }
-  const me = state.me, g = me.goals;
+// The profile is a list of sections; each opens as a sub-screen at #profile/<key>,
+// so the browser's Back returns to the list.
+const PROFILE_SECTIONS = {
+  goals: { icon: "target", title: "Норма и цель" },
+  water: { icon: "drop", title: "Вода" },
+  health: { icon: "heart", title: "Apple Health" },
+  notify: { icon: "bell", title: "Уведомления" },
+  admin: { icon: "shield", title: "Админка", admin: true },
+};
+const profileHash = () => location.hash.match(/^#profile\/(\w+)/)?.[1] || null;
+
+function leaveProfileHash() {
+  if (profileHash()) history.replaceState(null, "", "/");
+}
+
+function openProfileSection(key) {
+  if (!PROFILE_SECTIONS[key]) return;
+  history.pushState({ profileSub: key }, "", `#profile/${key}`);
+  renderProfileScreen(key);
+}
+
+function profileBack() {
+  // Our own entry sits on top of the list: going back keeps the history tidy.
+  if (history.state?.profileSub) return history.back();
+  history.replaceState(null, "", "/");
+  renderProfileScreen(null);
+}
+
+window.addEventListener("popstate", () => {
+  if (state.view !== "profile") return;
+  if (!sheet.hidden) closeSheet();
+  loadProfileView(profileHash());
+});
+
+async function loadProfileView(section = null) {
+  if (!section) leaveProfileHash();
   showTabs("profile");
+  showSkeleton("profile");
+  state.view = "profile";
+  try {
+    [state.me, state.profile] = await Promise.all([api("/api/me"), api("/api/profile")]);
+  } catch (err) {
+    if (err.status === 401) return renderAuth();
+    app.innerHTML = `<div class="card error">${esc(err.message)}</div>`;
+    return;
+  }
+  if (state.view !== "profile") return;
+  renderProfileScreen(section);
+}
+
+function profileValue(key, me, p) {
+  const g = me.goals, n = p.notify;
+  if (key === "goals") return `${g.kcal} ккал · Б ${g.protein} · Ж ${g.fat} · У ${g.carbs}`;
+  if (key === "water") return p.track_water ? `${kgFmt(p.water_goal_ml / 1000)} л в день` : "выключено";
+  if (key === "health") return p.health.connected ? "подключено" : "не подключено";
+  if (key === "notify") {
+    const on = [n.evening ? `вечером в ${n.hour}:00` : "", n.weekly ? "обзор недели" : "", n.share_streak ? "серии" : ""].filter(Boolean);
+    return on.length ? on.join(" · ") : "выключены";
+  }
+  return "пользователи, приглашения, лимиты";
+}
+
+function renderProfileScreen(section) {
+  const me = state.me, p = state.profile;
+  if (!me || !p) return loadProfileView(section);
+  state.profileSection = section && PROFILE_SECTIONS[section] && (!PROFILE_SECTIONS[section].admin || me.is_admin) ? section : null;
+  showTabs("profile");
+  if (!state.profileSection) return renderProfileList(me, p);
+  const key = state.profileSection;
+  const body = {
+    goals: () => `
+      <form class="card" id="goals">
+        <b>Норма в день</b>
+        <div class="row"><div class="grow"><label>Ккал</label><input name="kcal" type="number" inputmode="numeric" value="${me.goals.kcal}"></div>
+        <div class="grow"><label>Белки, г</label><input name="protein" type="number" inputmode="numeric" value="${me.goals.protein}"></div></div>
+        <div class="row"><div class="grow"><label>Жиры, г</label><input name="fat" type="number" inputmode="numeric" value="${me.goals.fat}"></div>
+        <div class="grow"><label>Углеводы, г</label><input name="carbs" type="number" inputmode="numeric" value="${me.goals.carbs}"></div></div>
+        <button class="primary block" style="margin-top:12px">Сохранить</button>
+      </form>
+      <div class="card" id="profile-card"></div>`,
+    water: () => '<div class="card" id="water-card"></div>',
+    health: () => '<div class="card" id="health-card"></div>',
+    notify: () => '<div class="card" id="notify-card"></div>',
+    admin: () => '<div class="card" id="admin"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>',
+  }[key]();
+  app.innerHTML = `${topbar(PROFILE_SECTIONS[key].title, me.username, "", "profile-back")}${body}`;
+  window.scrollTo(0, 0);
+  if (key === "goals") {
+    $("#goals").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      try {
+        state.me = await api("/api/me", { method: "PUT", json: { kcal: +f.kcal, protein: +f.protein, fat: +f.fat, carbs: +f.carbs, timezone: TZ } });
+        toast("Норма сохранена");
+      } catch (err) { toast(err.message); }
+    };
+  }
+  if (key === "admin") renderAdmin();
+  else renderProfile(p);
+}
+
+function renderProfileList(me, p) {
+  const row = (key) => {
+    const s = PROFILE_SECTIONS[key];
+    return `<button class="lrow" data-act="profile:${key}">
+      <span class="lrow-ico">${ICONS[s.icon]}</span>
+      <span class="grow"><span class="lrow-title">${s.title}</span><span class="lrow-value">${esc(profileValue(key, me, p))}</span></span>
+      <span class="lrow-chev">${ICONS.right}</span>
+    </button>`;
+  };
   app.innerHTML = `
     ${topbar("Профиль", me.username, "")}
-    <form class="card" id="goals">
-      <b>Норма в день</b>
-      <div class="row"><div class="grow"><label>Ккал</label><input name="kcal" type="number" inputmode="numeric" value="${g.kcal}"></div>
-      <div class="grow"><label>Белки, г</label><input name="protein" type="number" inputmode="numeric" value="${g.protein}"></div></div>
-      <div class="row"><div class="grow"><label>Жиры, г</label><input name="fat" type="number" inputmode="numeric" value="${g.fat}"></div>
-      <div class="grow"><label>Углеводы, г</label><input name="carbs" type="number" inputmode="numeric" value="${g.carbs}"></div></div>
-      <button class="primary block" style="margin-top:12px">Сохранить</button>
-    </form>
-    <div class="card" id="profile-card"><div class="spinner"></div></div>
-    <div class="card" id="water-card"></div>
-    <div class="card" id="notify-card"></div>
-    <div class="card" id="health-card"></div>
-    <div class="card small">
-      <div class="muted">Распознавания и ИИ сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</div>
-      <button class="block" id="replay-onboarding" style="margin-top:10px">Пройти первые шаги заново</button>
-      <button class="block danger" id="logout" style="margin-top:8px">Выйти</button>
+    <div class="card list">${Object.keys(PROFILE_SECTIONS).filter((k) => !PROFILE_SECTIONS[k].admin || me.is_admin).map(row).join("")}</div>
+    <div class="card list">
+      <button class="lrow" id="replay-onboarding"><span class="lrow-ico">${ICONS.replay}</span><span class="grow"><span class="lrow-title">Пройти первые шаги заново</span></span></button>
+      <button class="lrow danger" id="logout"><span class="lrow-ico">${ICONS.logout}</span><span class="grow"><span class="lrow-title">Выйти</span></span></button>
     </div>
-    ${me.is_admin ? '<div class="card" id="admin"><div class="spinner"></div></div>' : ""}`;
-  $("#goals").onsubmit = async (e) => {
-    e.preventDefault();
-    const f = Object.fromEntries(new FormData(e.target));
-    try {
-      state.me = await api("/api/me", { method: "PUT", json: { kcal: +f.kcal, protein: +f.protein, fat: +f.fat, carbs: +f.carbs, timezone: TZ } });
-      toast("Норма сохранена");
-    } catch (err) { toast(err.message); }
-  };
+    <p class="muted small center">Распознавания и ИИ сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</p>`;
   $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.me = null; renderAuth(); };
   $("#replay-onboarding").onclick = () => renderOnboarding(1);
-  if (me.is_admin) renderAdmin();
-  loadProfile();
 }
 
 // ---------- coach ----------
@@ -1178,12 +1508,13 @@ function coachHtml(text) {
 }
 
 async function loadCoach() {
-  state.view = "coach";
+  leaveProfileHash();
   showTabs("coach");
-  app.innerHTML = `${topbar("Коуч", "чат о питании и привычках", "")}<div class="spinner"></div>`;
+  showSkeleton("coach");
+  state.view = "coach";
   try { state.coach = await api("/api/coach"); } catch (err) {
     if (err.status === 401) return renderAuth();
-    app.innerHTML += `<div class="error">${esc(err.message)}</div>`;
+    app.innerHTML = `${topbar("Коуч", "чат о питании и привычках", "")}<div class="card error">${esc(err.message)}</div>`;
     return;
   }
   renderCoach();
@@ -1195,16 +1526,16 @@ function renderCoach(pending = "") {
   const bubbles = c.messages.map((m) => `<div class="bubble ${m.role}">${m.role === "assistant" ? coachHtml(m.text) : `<p>${esc(m.text)}</p>`}</div>`).join("");
   app.innerHTML = `
     ${topbar("Коуч", left ? `осталось ${left} ${plural(left, "сообщение", "сообщения", "сообщений")} сегодня` : "сообщения на сегодня закончились",
-      c.messages.length ? '<button class="icon" data-act="coach-clear" aria-label="Очистить чат">🗑️</button>' : "")}
+      c.messages.length ? `<button class="icon" data-act="coach-clear" aria-label="Очистить чат">${ICONS.trash}</button>` : "")}
     <div class="chat" id="chat">
-      ${c.messages.length ? bubbles : `<div class="empty"><div class="empty-ico">💬</div><b>Спроси что угодно о питании</b>
+      ${c.messages.length ? bubbles : `<div class="empty"><div class="empty-ico">${ICONS.chat}</div><b>Спроси что угодно о питании</b>
         <p>Коуч видит твой дневник: норму, что съедено сегодня, неделю, вес и серии.</p></div>
         <div class="starters">${COACH_STARTERS.map((q, j) => `<button class="chip" data-starter="${j}">${esc(q)}</button>`).join("")}</div>`}
       ${pending ? `<div class="bubble user"><p>${esc(pending)}</p></div><div class="bubble assistant typing"><i></i><i></i><i></i></div>` : ""}
     </div>
     <form class="composer" id="coach-form">
       <textarea id="coach-text" rows="1" placeholder="${left ? "Напиши коучу…" : "Продолжим завтра"}" ${left && !pending ? "" : "disabled"} maxlength="2000"></textarea>
-      <button class="primary" ${left && !pending ? "" : "disabled"} aria-label="Отправить">↑</button>
+      <button class="primary" ${left && !pending ? "" : "disabled"} aria-label="Отправить">${ICONS.up}</button>
     </form>
     <div id="coach-error" class="error"></div>`;
   window.scrollTo(0, document.body.scrollHeight);
@@ -1247,7 +1578,7 @@ async function renderOnboarding(step = 1) {
     <button class="block ghost-line" id="onb-skip">Пропустить настройку</button></div>`;
   if (step === 1) {
     app.innerHTML = `${head("Твоя норма", "Посчитаю калории и БЖУ под твой вес и цель. Потом их уточнит твой же дневник.")}
-      <div class="card" id="profile-card"><div class="spinner"></div></div>${foot()}`;
+      <div class="card" id="profile-card"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>${foot()}`;
     loadProfile();
   } else if (step === 2) {
     app.innerHTML = `${head("Поставь на экран «Домой»", "Так приложение открывается как обычное и может присылать напоминания.")}
@@ -1255,7 +1586,7 @@ async function renderOnboarding(step = 1) {
         <li>Открой этот сайт в Safari.</li>
         <li>Нажми «Поделиться» <span class="muted">(квадрат со стрелкой вверх)</span>.</li>
         <li>Выбери «На экран «Домой»» → «Добавить».</li>
-        <li>Дальше открывай приложение с иконки 🥗.</li>
+        <li>Дальше открывай приложение с иконки на экране «Домой».</li>
       </ol></div>${foot("Сделал, дальше")}`;
   } else {
     let n = { evening: true, hour: 21, weekly: true, share_streak: false };
@@ -1298,7 +1629,16 @@ async function loadProfile() {
   catch (err) { const b = $("#profile-card"); if (b) b.innerHTML = `<div class="error">${esc(err.message)}</div>`; }
 }
 
+// Fills whichever profile boxes the current screen has.
 function renderProfile(p) {
+  state.profile = p;
+  renderCalculator(p);
+  renderHealth(p.health);
+  renderNotify(p.notify);
+  renderWaterSettings(p);
+}
+
+function renderCalculator(p) {
   const box = $("#profile-card");
   if (!box) return;
   const opt = (list, cur) => list.map((o) => `<option value="${o.value}" ${o.value === cur ? "selected" : ""}>${esc(o.label)}</option>`).join("");
@@ -1339,16 +1679,13 @@ function renderProfile(p) {
     } catch (err) { toast(err.message); }
   };
   if (f) $("#apply-formula").onclick = () => applyGoals(f.suggested);
-  renderHealth(p.health);
-  renderNotify(p.notify);
-  renderWaterSettings(p);
 }
 
 function renderWaterSettings(p) {
   const box = $("#water-card");
   if (!box) return;
   const goals = [1500, 2000, 2500, 3000].map((ml) => `<option value="${ml}" ${ml === p.water_goal_ml ? "selected" : ""}>${kgFmt(ml / 1000)} л</option>`).join("");
-  box.innerHTML = `<b>💧 Вода</b>
+  box.innerHTML = `<b>Вода на экране дня</b>
     <form id="water-form" class="toggles">
       <label class="check"><input type="checkbox" name="track" ${p.track_water ? "checked" : ""}> Считать стаканы на экране дня, цель <select name="goal">${goals}</select></label>
     </form>`;
@@ -1365,7 +1702,7 @@ function renderHealth(h, token = null) {
   const url = `${location.origin}/api/health`;
   if (token) {
     box.innerHTML = `
-      <b>⌚ Подключение Apple Watch</b>
+      <b>Подключение Apple Watch</b>
       <p class="small">Ключ показывается один раз — скопируй его в команду.</p>
       <label>Адрес</label><div class="row"><input readonly value="${esc(url)}"><button data-copy-text="${esc(url)}">Копировать</button></div>
       <label>Заголовок Authorization</label><div class="row"><input readonly value="Bearer ${esc(token)}"><button data-copy-text="Bearer ${esc(token)}">Копировать</button></div>
@@ -1383,7 +1720,7 @@ function renderHealth(h, token = null) {
     return;
   }
   box.innerHTML = `
-    <b>⌚ Apple Watch и «Здоровье»</b>
+    <b>Apple Watch и «Здоровье»</b>
     <p class="muted small" style="margin:4px 0 10px">${h.connected
       ? (h.last_day ? `Подключено. Последние данные — ${esc(dayLabel(h.last_day).toLowerCase())}.` : "Ключ выдан, данных пока не было.")
       : "Команда на iPhone раз в день отправляет активные калории и шаги. Они появятся в дневнике, отчётах и обзоре недели. Вес пиши в приложении."}</p>
@@ -1441,7 +1778,7 @@ async function renderNotify(n, { autosave = true } = {}) {
   }
   const hours = [17, 18, 19, 20, 21, 22, 23].map((h) => `<option value="${h}" ${h === n.hour ? "selected" : ""}>${h}:00</option>`).join("");
   box.innerHTML = `
-    <b>🔔 Напоминания и серии</b>
+    <b>Напоминания и серии</b>
     <div style="margin:8px 0 4px">${device}</div>
     <form id="notify-form" class="toggles">
       <label class="check"><input type="checkbox" name="evening" ${n.evening ? "checked" : ""}> Напомнить вечером, если день пустой, в <select name="hour">${hours}</select></label>
@@ -1511,6 +1848,7 @@ async function start() {
     if (state.me.timezone !== TZ) api("/api/me", { method: "PUT", json: { ...state.me.goals, timezone: TZ } }).then((m) => (state.me = m)).catch(() => {});
     // A tap on the weekly review notification opens /#reports.
     if (location.hash === "#reports") { history.replaceState(null, "", "/"); await loadStats(); }
+    else if (profileHash()) await loadProfileView(profileHash());
     else if (!state.me.onboarded) renderOnboarding(1);
     else await loadDay();
   } catch (err) {

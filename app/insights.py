@@ -59,13 +59,13 @@ def observations(db: Session, user: User, today: date) -> list[dict]:
     total = sum(d["kcal"] for d in days.values()) or 1
     evening = 100 * sum(d["evening"] for d in days.values()) / total
     if evening >= 45:
-        out.append({"icon": "🌙", "text": f"После {EVENING_HOUR}:00 — {round(evening)}% калорий дня. "
+        out.append({"icon": "moon", "text": f"После {EVENING_HOUR}:00 — {round(evening)}% калорий дня. "
                                           "Плотнее обед — и вечером легче удержаться в норме."})
 
     breakfasts = [d["breakfast_protein"] for d in days.values() if d["breakfast_protein"] is not None]
     if len(breakfasts) >= 3 and sum(breakfasts) / len(breakfasts) < 20 and user.protein_goal >= 80:
         avg = round(sum(breakfasts) / len(breakfasts))
-        out.append({"icon": "🍳", "text": f"На завтрак в среднем {avg} г белка. Яйца, творог или йогурт "
+        out.append({"icon": "egg", "text": f"На завтрак в среднем {avg} г белка. Яйца, творог или йогурт "
                                           "закроют 20–30 г — и норма за день наберётся проще."})
 
     weekday = [d["kcal"] for day, d in days.items() if day.weekday() < 5]
@@ -73,13 +73,13 @@ def observations(db: Session, user: User, today: date) -> list[dict]:
     if len(weekday) >= 3 and len(weekend) >= 2:
         diff = sum(weekend) / len(weekend) - sum(weekday) / len(weekday)
         if diff >= 300:
-            out.append({"icon": "🎉", "text": f"В выходные в среднем на {round(diff)} ккал больше, чем в будни."})
+            out.append({"icon": "party", "text": f"В выходные в среднем на {round(diff)} ккал больше, чем в будни."})
 
     if foods:
         name, kcal = max(foods.items(), key=lambda kv: kv[1])
         share = 100 * kcal / total
         if share >= 12:
-            out.append({"icon": "🔎", "text": f"«{name}» — {round(share)}% всех калорий за две недели."})
+            out.append({"icon": "search", "text": f"«{name}» — {round(share)}% всех калорий за две недели."})
     return out[:4]
 
 
