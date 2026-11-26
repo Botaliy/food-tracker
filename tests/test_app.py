@@ -827,3 +827,287 @@ def test_health_accepts_shortcut_formats(client):
         assert client.get("/api/day").json()["activity"]["active_kcal"] == 600.5
         bad = anon.post("/api/health", headers=h, json={"active_kcal": "много", "steps": None})
         assert bad.status_code == 400 and "active_kcal" in bad.json()["detail"]
+
+
+# ---------- photo thumbnails ----------
+
+@pytest.fixture
+def photo_dir():
+    import shutil
+    from app import photos
+    shutil.rmtree(photos.folder(), ignore_errors=True)
+    yield photos.folder()
+    shutil.rmtree(photos.folder(), ignore_errors=True)
+
+
+def _meal_body(**extra):
+    return {"title": "Обед", "items": [
+        {"name": "x", "grams": 100, "kcal_100": 100, "protein_100": 1, "fat_100": 1, "carbs_100": 1}], **extra}
+
+
+def _recognize_photo(client) -> str:
+    r = client.post("/api/recognize", data={"note": ""}, files={"photo": ("m.jpg", _jpeg(), "image/jpeg")})
+    assert r.status_code == 200, r.text
+    return r.json()["photo"]
+
+
+def test_photo_saved_on_recognize_and_attached_to_meal(client, db, fake_model, photo_dir):
+    from PIL import Image
+    from app import photos
+    name = _recognize_photo(client)
+    assert photos.NAME_RE.fullmatch(name)
+    path = photo_dir / name
+    with Image.open(path) as img:
+        assert max(img.size) == 320
+    assert path.stat().st_size < 40_000
+
+    meal = client.post("/api/meals", json=_meal_body(photo=name)).json()
+    assert meal["photo"] == name
+    assert client.get("/api/day").json()["meals"][0]["photo"] == name
+    # One file, one meal: a second meal can't take it, nor a made-up or missing name.
+    assert client.post("/api/meals", json=_meal_body(photo=name)).json()["photo"] is None
+    assert client.post("/api/meals", json=_meal_body(photo="../../food.db")).json()["photo"] is None
+    assert client.post("/api/meals", json=_meal_body(photo="A" * 22 + ".jpg")).json()["photo"] is None
+
+    # An edit without "photo" keeps it.
+    assert client.put(f"/api/meals/{meal['id']}", json=_meal_body()).json()["photo"] == name
+    r = client.get(f"/api/photos/{name}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    assert r.headers["cache-control"] == "private, max-age=31536000, immutable"
+
+    client.delete(f"/api/meals/{meal['id']}")
+    assert not path.exists()
+
+
+def test_photo_access_control(client, db, fake_model, photo_dir):
+    from fastapi.testclient import TestClient
+    mine = _recognize_photo(client)
+    client.post("/api/meals", json=_meal_body(photo=mine))
+    draft_only = _recognize_photo(client)
+    assert client.get(f"/api/photos/{mine}").status_code == 200
+    assert client.get("/api/photos/not-a-photo.png").status_code == 404
+    assert client.get("/api/photos/..%2F..%2Ffood.db").status_code == 404
+
+    with TestClient(client.app) as anon:
+        assert anon.get(f"/api/photos/{mine}").status_code == 401
+
+    make_user(db, "boris")
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
+    assert client.get(f"/api/photos/{mine}").status_code == 404
+    # An unclaimed photo is a draft: served until a meal takes it.
+    assert client.get(f"/api/photos/{draft_only}").status_code == 200
+
+
+def test_photo_cleanup(client, db, fake_model, photo_dir, monkeypatch):
+    import os
+    import time
+    from app import photos
+    from app.config import get_settings
+    from app.models import Meal
+
+    old_meal, fresh_meal, old_draft, fresh_draft = (_recognize_photo(client) for _ in range(4))
+    client.post("/api/meals", json=_meal_body(photo=old_meal))
+    client.post("/api/meals", json=_meal_body(photo=fresh_meal))
+    now = time.time()
+    for name, days in ((old_meal, 31), (old_draft, 2)):
+        os.utime(photo_dir / name, (now - days * 86400, now - days * 86400))
+
+    assert photos.cleanup(db) == 2
+    left = {p.name for p in photo_dir.iterdir()}
+    assert left == {fresh_meal, fresh_draft}
+    db.expire_all()
+    assert sorted(m.photo or "" for m in db.query(Meal)) == sorted(["", fresh_meal])
+
+    # PHOTO_KEEP_DAYS=0: nothing is written, and what is there goes.
+    monkeypatch.setattr(get_settings(), "photo_keep_days", 0)
+    r = client.post("/api/recognize", data={"note": ""}, files={"photo": ("m.jpg", _jpeg(), "image/jpeg")})
+    assert r.json()["photo"] is None
+    photos.cleanup(db)
+    assert list(photo_dir.iterdir()) == []
+    db.expire_all()
+    assert all(m.photo is None for m in db.query(Meal))
+
+
+def test_photo_cleanup_never_breaks_recognize(client, fake_model, photo_dir, monkeypatch):
+    from app import photos
+
+    def boom(db):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(photos, "cleanup", boom)
+    monkeypatch.setattr(photos, "_last_cleanup", 0.0)
+    assert client.post("/api/recognize", data={"note": "яблоко"}).status_code == 200
+
+
+# ---------- fibre, sugar, salt ----------
+
+def test_extra_nutrients_from_recognition_to_day_totals(client, db, monkeypatch):
+    from app.models import Food
+    breast = add_food(db, "Chicken, broilers or fryers, breast, meat only, roasted", 165, 31, 3.6, 0)
+    breast.fiber, breast.salt = 0.0, 0.2  # the database knows fibre and salt, not sugar
+    db.commit()
+    rec = json.loads(json.dumps(RECOGNITION))
+    for it, (fib, sug, salt) in zip(rec["items"], ((1.0, 0.5, 1.0), (0.4, 0.1, 0.0), (0.5, 12.0, 4.0))):
+        it.update(fiber_100=fib, sugar_100=sug, salt_100=salt)
+    fake = FakeClient(fake_response(json.dumps(rec)))
+    real = recognize_mod.recognize
+    monkeypatch.setattr("app.routers.api.recognize", lambda img, note, hints=(): real(img, note, hints, client=fake))
+
+    draft = client.post("/api/recognize", data={"note": "обед"}).json()
+    chicken, rice, sauce = draft["items"]
+    assert chicken["food_id"] == breast.id
+    assert (chicken["fiber_100"], chicken["sugar_100"], chicken["salt_100"]) == (0.0, 0.5, 0.2)  # db wins, model fills
+    assert (sauce["fiber_100"], sauce["sugar_100"], sauce["salt_100"]) == (0.5, 12.0, 4.0)
+    assert "fiber_100" in fake.kwargs["output_config"]["format"]["schema"]["properties"]["items"]["items"]["required"]
+
+    keys = ("name", "grams", "food_id", "source", "kcal_100", "protein_100", "fat_100", "carbs_100",
+            "fiber_100", "sugar_100", "salt_100")
+    items = [{k: i[k] for k in keys} for i in (chicken, sauce)]
+    items[0]["salt_100"] = 9.0  # a tampered client can't change a database value
+    items.append({"name": "Неизвестное", "grams": 100, "kcal_100": 50, "protein_100": 0, "fat_100": 0, "carbs_100": 0})
+    meal = client.post("/api/meals", json={"title": "Обед", "items": items}).json()
+    assert meal["items"][0]["salt_100"] == 0.2 and meal["items"][2]["fiber_100"] is None
+
+    day = client.get("/api/day").json()
+    t = day["totals"]
+    # chicken 150 g, sauce 20 g; the unknown item adds nothing (and isn't a zero either).
+    assert t["fiber"] == pytest.approx(0.1) and t["sugar"] == pytest.approx(0.75 + 2.4, abs=0.05)
+    assert t["salt"] == pytest.approx(0.3 + 0.8)
+    assert day["refs"] == {"fiber": 28, "salt": 5}
+    assert db.get(Food, breast.id).sugar is None
+
+    s = client.get("/api/stats?days=7").json()
+    assert s["avg"]["salt"] == pytest.approx(1.1) and s["refs"]["fiber"] == 28
+
+
+def test_extra_nutrients_unknown_is_none(client):
+    _eat(client, f"{_local_today()}T12:00:00", 300)
+    day = client.get("/api/day").json()
+    assert (day["totals"]["fiber"], day["totals"]["sugar"], day["totals"]["salt"]) == (None, None, None)
+    assert client.get("/api/stats?days=7").json()["avg"]["fiber"] is None
+
+
+def test_custom_food_and_barcode_carry_extras(client, monkeypatch):
+    from app import barcodes
+    food = client.post("/api/foods", json={"name": "Хлебцы", "kcal_100": 350, "protein_100": 10, "fat_100": 3,
+                                            "carbs_100": 70, "fiber_100": 12.5, "salt_100": None}).json()
+    assert food["fiber_100"] == 12.5 and food["sugar_100"] is None and food["salt_100"] is None
+    assert client.get("/api/foods/search?q=Хлебцы").json()[0]["fiber_100"] == 12.5
+
+    product = {"product_name": "Muesli", "nutriments": {"energy-kcal_100g": 380, "proteins_100g": 9, "fat_100g": 6,
+                                                        "carbohydrates_100g": 64, "fiber_100g": "8", "salt_100g": 0.1}}
+    monkeypatch.setattr(barcodes, "_fetch", lambda code: product)
+    found = client.get("/api/foods/barcode/4600000000001").json()
+    assert (found["fiber_100"], found["sugar_100"], found["salt_100"]) == (8.0, None, 0.1)
+
+
+def test_digest_coach_and_insights_know_extras(client, fake_coach):
+    from datetime import timedelta
+    today = _local_today()
+    for k in range(1, 8):
+        client.post("/api/meals", json={"eaten_at": f"{today - timedelta(days=k)}T13:00:00", "items": [
+            {"name": "Паста", "grams": 300, "kcal_100": 150, "protein_100": 5, "fat_100": 3, "carbs_100": 28,
+             "fiber_100": 1.5, "sugar_100": 1, "salt_100": 0.6}]})
+    found = client.get("/api/insights").json()
+    fiber = next(f for f in found if f["icon"] == "wheat")
+    assert "4 г" in fiber["text"] and "28 г" in fiber["text"]
+
+    client.post("/api/coach", json={"text": "Как с клетчаткой?"})
+    kw = fake_coach.kwargs
+    data = json.loads(kw["system"][1]["text"].split("\n", 1)[1])
+    assert data["reference_per_day"] == {"fiber_g_target": 28, "salt_g_limit": 5}
+    assert data["today"]["eaten_extra_g"] == {"fiber": None, "sugar": None, "salt": None}
+    yesterday = next(d for d in data["last_7_days"]["days"] if d["date"] == (today - timedelta(days=1)).isoformat())
+    assert (yesterday["fiber_g"], yesterday["sugar_g"], yesterday["salt_g"]) == (4.5, 3.0, 1.8)
+    assert "не только добавленный" in kw["system"][0]["text"]
+
+
+# ---------- USDA import: extras, update in place, backfill ----------
+
+def _usda_zip(path, rows: str):
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("sr/food.csv", 'fdc_id,data_type,description\n1,sr_legacy_food,"Bread, rye"\n2,sr_legacy_food,"Apples, raw"\n')
+        zf.writestr("sr/food_nutrient.csv", "id,fdc_id,nutrient_id,amount\n" + rows)
+
+
+def test_import_usda_extras_in_place_and_backfill(tmp_path, client, db):
+    from app.models import Food, MealItem
+    base = "1,1,1008,259\n2,1,1003,8.5\n3,1,1004,3.3\n4,1,1005,48.3\n5,2,1008,52\n6,2,1003,0.3\n7,2,1004,0.2\n"
+    first = tmp_path / "a.zip"
+    _usda_zip(first, base + "8,2,1079,2.4\n")  # only the apple has fibre at first
+    import_usda.main([str(first)])
+    bread = db.query(Food).filter_by(source_id="1").one()
+    assert (bread.fiber, bread.sugar, bread.salt) == (None, None, None)
+    bread_id = bread.id
+
+    meal = client.post("/api/meals", json={"items": [
+        {"name": "Хлеб", "grams": 50, "food_id": bread_id, "source": "usda", "kcal_100": 0, "protein_100": 0, "fat_100": 0, "carbs_100": 0},
+        {"name": "Яблоко", "grams": 100, "food_id": db.query(Food).filter_by(source_id="2").one().id, "source": "usda",
+         "kcal_100": 0, "protein_100": 0, "fat_100": 0, "carbs_100": 0}]}).json()
+    assert meal["items"][0]["fiber_100"] is None and meal["items"][1]["fiber_100"] == 2.4
+
+    second = tmp_path / "b.zip"
+    # Fibre, total sugars (2000 wins over 1063), sodium in mg -> salt in g; the apple's fibre changed.
+    _usda_zip(second, base + "8,2,1079,9.9\n9,1,1079,5.8\n10,1,2000,3.9\n11,1,1063,7.7\n12,1,1093,660\n13,2,1063,10.4\n")
+    import_usda.main([str(second)])
+    db.expire_all()
+    assert db.query(Food).filter_by(source="usda").count() == 2
+    bread = db.get(Food, bread_id)  # same row, same id
+    assert (bread.fiber, bread.sugar, bread.salt) == (5.8, 3.9, 1.65)
+    assert db.query(Food).filter_by(source_id="2").one().sugar == 10.4
+
+    bread_item, apple_item = db.query(MealItem).order_by(MealItem.id).all()
+    assert bread_item.food_id == bread_id
+    assert (bread_item.fiber_100, bread_item.sugar_100, bread_item.salt_100) == (5.8, 3.9, 1.65)
+    assert apple_item.fiber_100 == 2.4  # what was eaten keeps its numbers
+
+
+# ---------- export ----------
+
+def test_export_zip(client, db):
+    import csv
+    import io
+    from datetime import timedelta
+    from app.models import Activity
+    today = _local_today()
+    client.post("/api/meals", json={"title": "Ужин, поздний", "eaten_at": f"{today}T23:30:00", "items": [
+        {"name": "Сырники", "grams": 150, "kcal_100": 220, "protein_100": 15, "fat_100": 10, "carbs_100": 18, "salt_100": 0.8},
+        {"name": "Сметана", "grams": 30, "kcal_100": 200, "protein_100": 2.5, "fat_100": 20, "carbs_100": 3.4}]})
+    _eat(client, f"{today - timedelta(days=10)}T09:00:00", 100)
+    client.put("/api/weight", json={"kg": 80.5})
+    client.post("/api/water", json={"delta_ml": 500})
+    admin_id = client.get("/api/me").json()["id"]
+    db.add(Activity(user_id=admin_id, day=today, steps=8400))
+    db.commit()
+
+    r = client.get("/api/export")
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    assert f'filename="food-tracker-{today}.zip"' in r.headers["content-disposition"]
+    zf = zipfile.ZipFile(io.BytesIO(r.content))
+    assert sorted(zf.namelist()) == ["activity.csv", "meals.csv", "water.csv", "weights.csv"]
+    raw = zf.read("meals.csv")
+    assert raw.startswith(b"\xef\xbb\xbf")
+    rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig"))))
+    assert rows[0] == ["date", "time", "meal_title", "item_name", "grams", "kcal", "protein", "fat", "carbs",
+                       "fiber", "sugar", "salt", "source"]
+    assert len(rows) == 4
+    syrniki = rows[2]
+    assert syrniki[:5] == [today.isoformat(), "23:30", "Ужин, поздний", "Сырники", "150.0"]
+    assert syrniki[5] == "330.0" and syrniki[9] == "" and syrniki[11] == "1.2" and syrniki[12] == "estimate"
+    assert rows[3][11] == ""
+    act = list(csv.reader(io.StringIO(zf.read("activity.csv").decode("utf-8-sig"))))
+    assert act == [["date", "active_kcal", "steps"], [today.isoformat(), "", "8400"]]
+    assert list(csv.reader(io.StringIO(zf.read("water.csv").decode("utf-8-sig"))))[1] == [today.isoformat(), "500"]
+    assert list(csv.reader(io.StringIO(zf.read("weights.csv").decode("utf-8-sig"))))[1] == [today.isoformat(), "80.5"]
+
+    week = client.get(f"/api/export?from={today - timedelta(days=2)}&to={today}")
+    meals = zipfile.ZipFile(io.BytesIO(week.content)).read("meals.csv").decode("utf-8-sig").splitlines()
+    assert len(meals) == 3  # the meal 10 days ago is out of range
+    assert client.get(f"/api/export?from={today}&to={today - timedelta(days=1)}").status_code == 400
+
+    make_user(db, "boris")
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
+    other = zipfile.ZipFile(io.BytesIO(client.get("/api/export").content))
+    assert len(other.read("meals.csv").decode("utf-8-sig").splitlines()) == 1

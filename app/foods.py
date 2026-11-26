@@ -94,6 +94,27 @@ def per100(food: Food) -> Per100:
     return Per100(food.kcal, food.protein, food.fat, food.carbs)
 
 
+# Fibre, total sugars, salt: g per 100 g, often unknown. Kept apart from the macros
+# because None (unknown) must never be summed as zero.
+EXTRA = ("fiber", "sugar", "salt")
+
+
+def _r(v: float | None, digits: int = 1) -> float | None:
+    return None if v is None else round(v, digits)
+
+
+def extra_totals(items) -> dict[str, float | None]:
+    """Sums of fibre, sugar and salt over meal items (with .grams and .<x>_100): known values
+    only, None when no item has the value."""
+    out: dict[str, float | None] = dict.fromkeys(EXTRA)
+    for i in items:
+        for key in EXTRA:
+            v = getattr(i, f"{key}_100")
+            if v is not None:
+                out[key] = (out[key] or 0.0) + v * i.grams / 100
+    return out
+
+
 def food_dict(food: Food) -> dict:
     return {
         "food_id": food.id,
@@ -104,4 +125,7 @@ def food_dict(food: Food) -> dict:
         "protein_100": round(food.protein, 1),
         "fat_100": round(food.fat, 1),
         "carbs_100": round(food.carbs, 1),
+        "fiber_100": _r(food.fiber),
+        "sugar_100": _r(food.sugar),
+        "salt_100": _r(food.salt, 2),
     }

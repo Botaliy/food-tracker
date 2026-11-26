@@ -26,6 +26,10 @@ class RecognizedItem(BaseModel):
     protein_100: float = Field(ge=0)
     fat_100: float = Field(ge=0)
     carbs_100: float = Field(ge=0)
+    # Required in SCHEMA; optional here so an answer without them still parses.
+    fiber_100: float | None = Field(None, ge=0)
+    sugar_100: float | None = Field(None, ge=0)
+    salt_100: float | None = Field(None, ge=0)
     confidence: str
 
 
@@ -56,9 +60,13 @@ SCHEMA = {
                     "protein_100": {"type": "number", "description": "Protein, g per 100 g."},
                     "fat_100": {"type": "number", "description": "Fat, g per 100 g."},
                     "carbs_100": {"type": "number", "description": "Carbohydrates, g per 100 g."},
+                    "fiber_100": {"type": "number", "description": "Dietary fibre, g per 100 g."},
+                    "sugar_100": {"type": "number", "description": "Total sugars (natural and added), g per 100 g."},
+                    "salt_100": {"type": "number", "description": "Salt (sodium x 2.5), g per 100 g."},
                     "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                 },
-                "required": ["name_ru", "name_en", "grams", "kcal_100", "protein_100", "fat_100", "carbs_100", "confidence"],
+                "required": ["name_ru", "name_en", "grams", "kcal_100", "protein_100", "fat_100", "carbs_100",
+                             "fiber_100", "sugar_100", "salt_100", "confidence"],
                 "additionalProperties": False,
             },
         },
@@ -87,6 +95,7 @@ Components:
 - Packaged products: if a label or brand is readable, name it and use its numbers.
 
 Numbers per 100 g are your best estimate; they are checked against a nutrition database.
+Also estimate fibre, total sugars and salt per 100 g (salt, not sodium; include salt added in cooking for home-made dishes).
 Return no items if there is no food. Be honest about confidence: "low" when the portion or the food itself is unclear."""
 
 

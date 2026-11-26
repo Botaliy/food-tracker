@@ -21,6 +21,17 @@ IN_GOAL_HIGH = 1.05
 PROTEIN_OK = 0.9
 
 
+# Reference points, not goals the user sets: fibre scales with how much one eats
+# (14 g per 1000 kcal), salt has a flat WHO ceiling. Total sugars get none: natural
+# sugar in fruit and milk counts too, so a "limit" on them would mislead.
+FIBER_PER_1000_KCAL = 14
+SALT_LIMIT_G = 5
+
+
+def nutrient_refs(kcal_goal: int) -> dict:
+    return {"fiber": round(FIBER_PER_1000_KCAL * kcal_goal / 1000), "salt": SALT_LIMIT_G}
+
+
 def today(user: User) -> date:
     return datetime.now(ZoneInfo(user.timezone)).date()
 

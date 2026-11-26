@@ -15,7 +15,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app import diary, usage
+from app import diary, foods, usage
 from app.config import get_settings
 from app.models import Activity, Meal, Review, User, Weight
 from app.recognize import RecognizeError as ReviewError
@@ -52,7 +52,7 @@ SCHEMA = {
 
 SYSTEM = """Ты разбираешь неделю дневника питания в трекере калорий и даёшь короткий обзор по-русски, обращаясь на «ты».
 
-Данные — суммы, посчитанные приложением: калории и БЖУ по дням, доля калорий по времени суток, продукты, давшие больше всего калорий, взвешивания. Если есть, по дням добавлены активные калории и шаги с Apple Watch; часы обычно завышают активные калории на 20–40%, так что сравнивай движение между днями, а не складывай его с нормой. Нормы пользователь задал сам. Дни без записей — это пропуски в дневнике, а не голодание; не делай из них выводов о питании.
+Данные — суммы, посчитанные приложением: калории и БЖУ по дням, доля калорий по времени суток, продукты, давшие больше всего калорий, взвешивания. Если есть, по дням добавлены активные калории и шаги с Apple Watch; часы обычно завышают активные калории на 20–40%, так что сравнивай движение между днями, а не складывай его с нормой. Нормы пользователь задал сам. Клетчатка, сахар и соль (fiber_g, sugar_g, salt_g) есть не у всех продуктов, поэтому это нижняя оценка, а если ключа нет — данных за день нет; ориентиры в reference_per_day: клетчатка 14 г на 1000 ккал нормы, соль не больше 5 г; сахар — это весь сахар (вместе с фруктовым и молочным), а не добавленный, ориентира для него нет. Дни без записей — это пропуски в дневнике, а не голодание; не делай из них выводов о питании.
 
 Как писать:
 - Опирайся на цифры из данных и называй их: «белок в среднем 85 г из 120», «вечером съедается 48% калорий».
@@ -80,6 +80,7 @@ def build_digest(meals, weights, goals: dict, tz: str, today: date, activity=())
     zone = ZoneInfo(tz)
     days = {first + timedelta(days=k): {"kcal": 0.0, "protein": 0.0, "fat": 0.0, "carbs": 0.0, "meals": 0}
             for k in range(REVIEW_DAYS)}
+    day_items: dict[date, list] = {d: [] for d in days}
     parts: dict[str, float] = {}
     foods: dict[str, dict] = {}
     for m in meals:
@@ -88,6 +89,7 @@ def build_digest(meals, weights, goals: dict, tz: str, today: date, activity=())
         if day is None:
             continue
         day["meals"] += 1
+        day_items[local.date()].extend(m.items)
         for i in m.items:
             k = i.grams / 100
             kcal = i.kcal_100 * k
@@ -106,9 +108,10 @@ def build_digest(meals, weights, goals: dict, tz: str, today: date, activity=())
     top = sorted(foods.items(), key=lambda kv: -kv[1]["kcal"])[:10]
     return {
         "goals_per_day": goals,
+        "reference_per_day": _refs(goals),
         "days": [
             {"date": d.isoformat(), "weekday": WEEKDAYS[d.weekday()],
-             **({k: round(x) for k, x in t.items()} if t["meals"] else {"logged": False}),
+             **({k: round(x) for k, x in t.items()} | _extras(day_items[d]) if t["meals"] else {"logged": False}),
              **{k: round(v) for k, v in moves.get(d, {}).items()}}
             for d, t in days.items()
         ],
@@ -116,6 +119,16 @@ def build_digest(meals, weights, goals: dict, tz: str, today: date, activity=())
         "top_foods_by_kcal": [{"name": n, "kcal_week": round(f["kcal"]), "times": f["times"]} for n, f in top],
         "weigh_ins_kg": [{"date": w.day.isoformat(), "kg": w.kg} for w in weights],
     }
+
+
+def _refs(goals: dict) -> dict:
+    r = diary.nutrient_refs(goals["kcal"])
+    return {"fiber_g_target": r["fiber"], "salt_g_limit": r["salt"]}
+
+
+def _extras(items) -> dict:
+    """fiber_g, sugar_g, salt_g for a day; a key is left out when no item had the value."""
+    return {f"{k}_g": round(v, 1) for k, v in foods.extra_totals(items).items() if v is not None}
 
 
 def logged_days(digest: dict) -> int:

@@ -16,6 +16,9 @@ def _estimate(item: RecognizedItem) -> dict:
         "protein_100": round(item.protein_100, 1),
         "fat_100": round(item.fat_100, 1),
         "carbs_100": round(item.carbs_100, 1),
+        "fiber_100": None if item.fiber_100 is None else round(item.fiber_100, 1),
+        "sugar_100": None if item.sugar_100 is None else round(item.sugar_100, 1),
+        "salt_100": None if item.salt_100 is None else round(item.salt_100, 2),
     }
 
 
@@ -31,6 +34,9 @@ def draft_item(db: Session, item: RecognizedItem, user_id: int) -> dict:
     estimate = _estimate(item)
     options = [estimate] + [foods.food_dict(f) for f in candidates]
     base = foods.food_dict(chosen) if chosen is not None else estimate
+    # Like the macros, a database value wins; unlike them, the database often has none,
+    # and then the model's estimate is better than nothing.
+    base = {**base, **{f"{k}_100": estimate[f"{k}_100"] for k in foods.EXTRA if base[f"{k}_100"] is None}}
     return {
         **base,
         # What's on the plate, in the user's words, even when the database row is named in English.
@@ -42,9 +48,10 @@ def draft_item(db: Session, item: RecognizedItem, user_id: int) -> dict:
     }
 
 
-def build_draft(db: Session, recognition: Recognition, user_id: int) -> dict:
+def build_draft(db: Session, recognition: Recognition, user_id: int, photo: str | None = None) -> dict:
     return {
         "title": recognition.title,
+        "photo": photo,
         "comment": recognition.comment,
         "items": [draft_item(db, item, user_id) for item in recognition.items],
     }

@@ -1,17 +1,21 @@
+import csv
 import hashlib
+import io
 import logging
 import json
 import re
 import secrets
+import zipfile
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, barcodes, coach, corrections, diary, energy, foods, insights, push, review as review_mod, usage
+from app import auth, barcodes, coach, corrections, diary, energy, foods, insights, photos, push, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
@@ -164,10 +168,14 @@ def recognize_meal(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     cost = usage.record_call(db, user, result.response, model=model)
-    draft = build_draft(db, result.recognition, user.id)
+    # A thumbnail only for a plate that has food on it; saving the meal claims it.
+    thumb = photos.save_thumbnail(image) if image is not None and result.recognition.items else None
+    del image
+    draft = build_draft(db, result.recognition, user.id, photo=thumb)
     draft["personal_hints"] = len(hints)
     draft["cost_usd"] = round(cost, 4)
     draft["spent_today"] = round(usage.spent_today(db, user), 4)
+    photos.maybe_cleanup(db)
     return draft
 
 
@@ -202,6 +210,9 @@ class FoodIn(BaseModel):
     protein_100: float = Field(ge=0, le=100)
     fat_100: float = Field(ge=0, le=100)
     carbs_100: float = Field(ge=0, le=100)
+    fiber_100: float | None = Field(None, ge=0, le=100)
+    sugar_100: float | None = Field(None, ge=0, le=100)
+    salt_100: float | None = Field(None, ge=0, le=100)
     barcode: str | None = Field(None, max_length=32)
 
 
@@ -211,6 +222,7 @@ def add_food(body: FoodIn, user: User = Depends(auth.current_user), db: Session 
         source="custom", name=body.name.strip(), name_ru=body.name.strip(), owner_id=user.id,
         barcode=barcodes.normalize(body.barcode) if body.barcode else None,
         kcal=body.kcal_100, protein=body.protein_100, fat=body.fat_100, carbs=body.carbs_100,
+        fiber=body.fiber_100, sugar=body.sugar_100, salt=body.salt_100,
     )
     db.add(food)
     db.commit()
@@ -243,6 +255,9 @@ class ItemIn(BaseModel):
     protein_100: float = Field(ge=0, le=100)
     fat_100: float = Field(ge=0, le=100)
     carbs_100: float = Field(ge=0, le=100)
+    fiber_100: float | None = Field(None, ge=0, le=100)  # None = unknown
+    sugar_100: float | None = Field(None, ge=0, le=100)
+    salt_100: float | None = Field(None, ge=0, le=100)
     ai_grams: float | None = Field(None, gt=0, le=5000)
 
 
@@ -250,6 +265,7 @@ class MealIn(BaseModel):
     title: str = Field(default="", max_length=200)
     eaten_at: datetime | None = None
     items: list[ItemIn] = Field(min_length=1, max_length=30)
+    photo: str | None = Field(None, max_length=64)  # a name from /api/recognize
 
 
 def _to_utc(dt: datetime | None, tz: str) -> datetime:
@@ -264,6 +280,7 @@ def _item(db: Session, body: ItemIn, user: User) -> MealItem:
     item = MealItem(
         name=body.name.strip(), grams=body.grams, source=body.source if body.source in {"estimate", "manual"} else "estimate",
         kcal_100=body.kcal_100, protein_100=body.protein_100, fat_100=body.fat_100, carbs_100=body.carbs_100,
+        fiber_100=body.fiber_100, sugar_100=body.sugar_100, salt_100=body.salt_100,
         ai_grams=body.ai_grams,
     )
     # A database food's numbers are taken from the database, not from the client.
@@ -271,6 +288,11 @@ def _item(db: Session, body: ItemIn, user: User) -> MealItem:
     if food is not None:
         item.food_id, item.source = food.id, food.source
         item.kcal_100, item.protein_100, item.fat_100, item.carbs_100 = food.kcal, food.protein, food.fat, food.carbs
+        # Where the database knows fibre/sugar/salt it wins; where it doesn't, the client's
+        # value (the model's estimate from the draft) is kept.
+        for key in foods.EXTRA:
+            if (v := getattr(food, key)) is not None:
+                setattr(item, f"{key}_100", v)
     return item
 
 
@@ -282,7 +304,10 @@ def _totals(items) -> dict:
         t["protein"] += i.protein_100 * k
         t["fat"] += i.fat_100 * k
         t["carbs"] += i.carbs_100 * k
-    return {key: round(v, 1) for key, v in t.items()}
+    out = {key: round(v, 1) for key, v in t.items()}
+    # Fibre, sugar, salt: known values only; None when no item has the value.
+    out.update({k: None if v is None else round(v, 1) for k, v in foods.extra_totals(items).items()})
+    return out
 
 
 def _meal_dict(meal: Meal, tz: str) -> dict:
@@ -295,11 +320,13 @@ def _meal_dict(meal: Meal, tz: str) -> dict:
             {
                 "id": i.id, "name": i.name, "grams": i.grams, "food_id": i.food_id, "source": i.source,
                 "kcal_100": i.kcal_100, "protein_100": i.protein_100, "fat_100": i.fat_100, "carbs_100": i.carbs_100,
+                "fiber_100": i.fiber_100, "sugar_100": i.sugar_100, "salt_100": i.salt_100,
                 "ai_grams": i.ai_grams,
             }
             for i in meal.items
         ],
         "totals": _totals(meal.items),
+        "photo": meal.photo,
     }
 
 
@@ -314,6 +341,9 @@ def _own_meal(db: Session, meal_id: int, user: User) -> Meal:
 def add_meal(body: MealIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
     meal = Meal(user_id=user.id, title=body.title.strip(), eaten_at=_to_utc(body.eaten_at, user.timezone))
     meal.items = [_item(db, i, user) for i in body.items]
+    # A photo that is gone (cleaned up overnight) or taken just doesn't attach: the meal still saves.
+    if photos.claimable(db, body.photo):
+        meal.photo = body.photo
     db.add(meal)
     db.commit()
     return _meal_dict(meal, user.timezone)
@@ -326,15 +356,39 @@ def update_meal(meal_id: int, body: MealIn, user: User = Depends(auth.current_us
     if body.eaten_at is not None:
         meal.eaten_at = _to_utc(body.eaten_at, user.timezone)
     meal.items = [_item(db, i, user) for i in body.items]
+    # No "photo" in the body keeps the current one; an explicit null removes it.
+    dropped = None
+    if "photo" in body.model_fields_set and body.photo != meal.photo:
+        if body.photo is None:
+            dropped, meal.photo = meal.photo, None
+        elif photos.claimable(db, body.photo, meal.id):
+            dropped, meal.photo = meal.photo, body.photo
     db.commit()
+    photos.delete(dropped)
     return _meal_dict(meal, user.timezone)
 
 
 @router.delete("/meals/{meal_id}")
 def delete_meal(meal_id: int, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
-    db.delete(_own_meal(db, meal_id, user))
+    meal = _own_meal(db, meal_id, user)
+    photo = meal.photo
+    db.delete(meal)
     db.commit()
+    photos.delete(photo)
     return {"ok": True}
+
+
+@router.get("/photos/{name}")
+def get_photo(name: str, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """Your own meals' photos, and drafts' photos nobody has claimed yet."""
+    path = photos.path_of(name)  # validates the name before any filesystem access
+    if path is None:
+        raise HTTPException(status_code=404, detail="Фото не найдено")
+    owner = db.scalar(select(Meal.user_id).where(Meal.photo == name).limit(1))
+    if (owner is not None and owner != user.id) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Фото не найдено")
+    return FileResponse(path, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=31536000, immutable"})
 
 
 RECENT_DAYS = 30
@@ -383,6 +437,7 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "meals": out,
         "totals": totals,
         "goals": _me(db, user)["goals"],
+        "refs": diary.nutrient_refs(user.kcal_goal),
         "activity": _activity_dict(act),
         "streaks": diary.streaks(db, user, _today(user)),
         "weight": _weight_outlook(db, user),
@@ -525,12 +580,17 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
     logged = [r for r in rows if r["meals"]]
     avg = {key: round(sum(r[key] for r in logged) / len(logged), 1) if logged else 0.0
            for key in ("kcal", "protein", "fat", "carbs")}
+    # Over the days that have the value at all: an unknown day isn't a zero day.
+    for key in foods.EXTRA:
+        known = [r[key] for r in logged if r[key] is not None]
+        avg[key] = round(sum(known) / len(known), 1) if known else None
     weights = _weights(db, user, first, today)
     last_weight = db.scalar(select(Weight).where(Weight.user_id == user.id).order_by(Weight.day.desc()).limit(1))
     return {
         "from": first.isoformat(),
         "to": today.isoformat(),
         "goals": _me(db, user)["goals"],
+        "refs": diary.nutrient_refs(user.kcal_goal),
         "days": rows,
         "avg": avg,
         "logged_days": len(logged),
@@ -577,6 +637,69 @@ def delete_weight(date_: date | None = Query(None, alias="date"), user: User = D
         db.delete(w)
         db.commit()
     return {"ok": True}
+
+
+# ---------- export ----------
+
+def _csv(header: list[str], rows) -> bytes:
+    """UTF-8 with a BOM, so Excel opens Cyrillic right; None becomes an empty cell."""
+    buf = io.StringIO()
+    buf.write("﻿")
+    w = csv.writer(buf)
+    w.writerow(header)
+    for row in rows:
+        w.writerow(["" if v is None else v for v in row])
+    return buf.getvalue().encode("utf-8")
+
+
+def _portion(per100: float | None, grams: float, digits: int = 1) -> float | None:
+    return None if per100 is None else round(per100 * grams / 100, digits)
+
+
+@router.get("/export")
+def export(
+    first: date | None = Query(None, alias="from"),
+    last: date | None = Query(None, alias="to"),
+    user: User = Depends(auth.current_user),
+    db: Session = Depends(get_db),
+):
+    """Everything the user logged, as CSV files in a zip. Dates are inclusive, local."""
+    if first and last and first > last:
+        raise HTTPException(status_code=400, detail="Начальная дата позже конечной")
+    zone = ZoneInfo(user.timezone)
+    meal_q = select(Meal).where(Meal.user_id == user.id).options(selectinload(Meal.items)).order_by(Meal.eaten_at)
+    if first:
+        meal_q = meal_q.where(Meal.eaten_at >= usage.day_bounds_utc(user.timezone, first)[0])
+    if last:
+        meal_q = meal_q.where(Meal.eaten_at < usage.day_bounds_utc(user.timezone, last)[1])
+
+    def meal_rows():
+        for m in db.scalars(meal_q):
+            local = m.eaten_at.replace(tzinfo=UTC).astimezone(zone)
+            for i in m.items:
+                yield [local.date().isoformat(), local.strftime("%H:%M"), m.title, i.name, round(i.grams, 1),
+                       _portion(i.kcal_100, i.grams), _portion(i.protein_100, i.grams), _portion(i.fat_100, i.grams),
+                       _portion(i.carbs_100, i.grams), _portion(i.fiber_100, i.grams), _portion(i.sugar_100, i.grams),
+                       _portion(i.salt_100, i.grams, 2), i.source]
+
+    def by_day(model, *cols):
+        q = select(model).where(model.user_id == user.id).order_by(model.day)
+        if first:
+            q = q.where(model.day >= first)
+        if last:
+            q = q.where(model.day <= last)
+        return ([r.day.isoformat(), *(getattr(r, c) for c in cols)] for r in db.scalars(q))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("meals.csv", _csv(["date", "time", "meal_title", "item_name", "grams", "kcal", "protein", "fat",
+                                       "carbs", "fiber", "sugar", "salt", "source"], meal_rows()))
+        zf.writestr("weights.csv", _csv(["date", "kg"], by_day(Weight, "kg")))
+        zf.writestr("water.csv", _csv(["date", "ml"], by_day(Water, "ml")))
+        zf.writestr("activity.csv", _csv(["date", "active_kcal", "steps"], by_day(Activity, "active_kcal", "steps")))
+    name = f"food-tracker-{_today(user).isoformat()}.zip"
+    return Response(buf.getvalue(), media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
 
 
 # ---------- weekly review ----------

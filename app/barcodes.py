@@ -69,10 +69,13 @@ def from_off(product: dict, code: str, user: User) -> Food | None:
         return None
     full = f"{name} ({brand})" if brand and brand.lower() not in name.lower() else name
     clamp = lambda v: min(100.0, max(0.0, v or 0.0))  # noqa: E731
+    # Often missing from the label data: a missing value stays unknown, not zero.
+    maybe = lambda key: None if (v := _num(n, key)) is None else clamp(v)  # noqa: E731
     return Food(
         source="off", source_id=code, barcode=code, name=full[:300], name_ru=full[:300], owner_id=user.id,
         kcal=round(kcal, 1),
         protein=clamp(_num(n, "proteins_100g")), fat=clamp(_num(n, "fat_100g")), carbs=clamp(_num(n, "carbohydrates_100g")),
+        fiber=maybe("fiber_100g"), sugar=maybe("sugars_100g"), salt=maybe("salt_100g"),
     )
 
 

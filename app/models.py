@@ -52,6 +52,10 @@ class Food(Base):
     protein: Mapped[float] = mapped_column(Float)
     fat: Mapped[float] = mapped_column(Float)
     carbs: Mapped[float] = mapped_column(Float)
+    # g per 100 g; None = unknown (never read as zero). Salt, not sodium.
+    fiber: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sugar: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salt: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Who added a custom or scanned food (shown first in their own search); None for USDA.
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
@@ -65,6 +69,8 @@ class Meal(Base):
     title: Mapped[str] = mapped_column(String(200), default="")
     eaten_at: Mapped[datetime] = mapped_column(DateTime, index=True)  # UTC
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # File name of the thumbnail in <data dir>/photos (app.photos); None = no photo.
+    photo: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
 
     items: Mapped[list["MealItem"]] = relationship(
         back_populates="meal", cascade="all, delete-orphan", order_by="MealItem.id"
@@ -87,6 +93,9 @@ class MealItem(Base):
     protein_100: Mapped[float] = mapped_column(Float)
     fat_100: Mapped[float] = mapped_column(Float)
     carbs_100: Mapped[float] = mapped_column(Float)
+    fiber_100: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = unknown
+    sugar_100: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salt_100: Mapped[float | None] = mapped_column(Float, nullable=True)
     # The model's own weight for a recognized item, to learn from the user's corrections.
     ai_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
 

@@ -1,4 +1,5 @@
-"""Meal photos: shrunk before they go to the model, never stored.
+"""Meal photos: shrunk before they go to the model. The full-size photo is never
+stored; only a small thumbnail is kept for the meal card (see app.photos).
 
 The browser already shrinks photos before upload; this is the safety net for
 one that didn't (an old browser, a direct API call). Decoding with draft()

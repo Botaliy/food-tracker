@@ -8,8 +8,8 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, get_settings
-from app import push, reminders
-from app.database import init_db
+from app import photos, push, reminders
+from app.database import SessionLocal, init_db
 from app.routers import admin, api
 
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +20,8 @@ STATIC_DIR = BASE_DIR / "app" / "static"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    with SessionLocal() as db:
+        photos.cleanup_safely(db)
     task = asyncio.create_task(reminders.loop()) if settings.scheduler_enabled and push.enabled() else None
     yield
     if task:

@@ -173,9 +173,9 @@ async function loadDay() {
   }
 }
 
-function bar(value, goal, color = "var(--accent)") {
+function bar(value, goal, color = "var(--accent)", warnOver = true) {
   const pct = goal > 0 ? Math.min(100, (value / goal) * 100) : 0;
-  return `<div class="bar ${isOver(value, goal) ? "over" : ""}" style="--c:${color}"><i style="width:${pct}%"></i></div>`;
+  return `<div class="bar ${warnOver && isOver(value, goal) ? "over" : ""}" style="--c:${color}"><i style="width:${pct}%"></i></div>`;
 }
 
 // Stroke icons, 24x24, drawn in currentColor: emoji look different on every platform.
@@ -217,6 +217,7 @@ const ICONS = Object.fromEntries(Object.entries({
   shield: '<path d="M12 3.5l7 2.5v5.5c0 4.5-3 7.8-7 9-4-1.2-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/>',
   logout: '<path d="M14 4.5H7A1.5 1.5 0 0 0 5.5 6v12A1.5 1.5 0 0 0 7 19.5h7M10.5 12h9M16.5 8.5l3.5 3.5-3.5 3.5"/>',
   replay: '<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/>',
+  download: '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/>',
   // Parts of the day for meals without a photo, and the observations from /api/insights.
   cup: '<path d="M5 9h11v4.5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16M8.5 3.5v2.5M12 3.5v2.5"/>',
   bowl: '<path d="M4 11h16a8 8 0 0 1-16 0z"/><path d="M9.5 21h5M9 7.5c0-1.5 1-1.5 1-3M13.5 7.5c0-1.5 1-1.5 1-3"/>',
@@ -224,6 +225,7 @@ const ICONS = Object.fromEntries(Object.entries({
   apple: '<path d="M12 7.5c-1.5-1-3-1.2-4.5-.8C5 7.4 4 10 4.5 13c.6 3.8 3 7 5.2 7 .9 0 1.4-.4 2.3-.4s1.4.4 2.3.4c2.2 0 4.6-3.2 5.2-7 .5-3-.5-5.6-3-6.3-1.5-.4-3-.2-4.5.8z"/><path d="M12 7.5c0-2 1-3.5 3-4"/>',
   moon: '<path d="M19.5 14.5A7.5 7.5 0 0 1 9.5 4.5a7.5 7.5 0 1 0 10 10z"/>',
   egg: '<path d="M12 3.5c3.3 0 6 5 6 9.5a6 6 0 0 1-12 0c0-4.5 2.7-9.5 6-9.5z"/>',
+  wheat: '<path d="M12 21V8"/><path d="M12 12.5c-2.6 0-4-1.6-4-4 2.6 0 4 1.6 4 4zM12 12.5c2.6 0 4-1.6 4-4-2.6 0-4 1.6-4 4zM12 17c-2.6 0-4-1.6-4-4 2.6 0 4 1.6 4 4zM12 17c2.6 0 4-1.6 4-4-2.6 0-4 1.6-4 4zM12 8c-1.2-1-1.2-3.2 0-4.5 1.2 1.3 1.2 3.5 0 4.5z"/>',
   party: '<path d="M4 20l4.5-11 6.5 6.5z"/><path d="M13.5 4.5c.6 1.2.4 2.5-.5 3.5M19.5 10.5c-1.2-.6-2.5-.4-3.5.5M17 3.5h.01M20.5 7h.01M10.5 3.5h.01M20.5 14h.01"/>',
 }).map(([k, d]) => [k, svgIcon(d)]));
 // A server-sent icon key may be unknown to an old cached shell: draw nothing rather than break.
@@ -341,6 +343,7 @@ function renderDay() {
           .map(([k, n, v, goal, c]) => `<div class="macro">${ring(k, v, goal, c, 62, 7, `<b>${r0(v)}</b>`)}
             <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
+      ${nutrientLine(t, state.dayData.refs)}
       ${activityLine(state.dayData.activity)}
     </div>
     ${isToday ? quickTiles(state.dayData) : ""}
@@ -508,6 +511,18 @@ function streaksRow(st, { others = false } = {}) {
     ${st.people.length === 1 ? '<span class="muted small">Пока участвуешь только ты</span>' : ""}</div>`;
 }
 
+// Fibre, sugar, salt: a quiet reference line, not a goal to fail. Only the salt limit gets a colour.
+const gFmt = (n) => String(r1(n)).replace(".", ",");
+function nutrientLine(t, refs) {
+  if (t.fiber == null && t.sugar == null && t.salt == null) return "";
+  const item = (label, value, cls = "") => `<span class="nut-item ${cls}">${label} <b>${value}</b></span>`;
+  return `<div class="nut" aria-label="Клетчатка, сахар и соль">
+    ${t.fiber != null ? item("Клетчатка", `${r0(t.fiber)}${refs ? ` / ${refs.fiber}` : ""} г`) : ""}
+    ${t.sugar != null ? item("Сахар", `${r0(t.sugar)} г`) : ""}
+    ${t.salt != null ? item("Соль", `${gFmt(t.salt)}${refs ? ` / ${refs.salt}` : ""} г`, refs && t.salt > refs.salt ? "over" : "") : ""}
+  </div>`;
+}
+
 // Footer of the summary card: each value stays whole, the pair may wrap between items.
 function activityLine(a) {
   if (!a || (a.active_kcal == null && a.steps == null)) return "";
@@ -528,7 +543,7 @@ function mealCard(m) {
   return `<div class="meal-wrap">
     <button class="meal-del" data-meal-del="${m.id}" aria-label="Удалить приём пищи" tabindex="-1">${ICONS.trash}<span>Удалить</span></button>
     <div class="card meal" data-meal="${m.id}" role="button" tabindex="0" aria-label="${esc(m.title || name)}, ${r0(m.totals.kcal)} ккал — изменить">
-      <div class="meal-ico">${ICONS[icon]}</div>
+      <div class="meal-ico">${ICONS[icon]}${m.photo ? `<img src="/api/photos/${encodeURIComponent(m.photo)}" loading="lazy" decoding="async" alt="">` : ""}</div>
       <div class="grow">
         <div class="meal-head"><span class="meal-title">${esc(m.title || name)}</span><span class="meal-kcal">${r0(m.totals.kcal)} <small>ккал</small></span></div>
         <div class="meal-items">${m.items.map((i) => `${esc(i.name)} ${r0(i.grams)} г`).join(" · ")}</div>
@@ -682,12 +697,16 @@ app.addEventListener("click", (e) => {
     loadProfileView();
   } else if (mealEl) {
     const meal = state.dayData.meals.find((m) => m.id === Number(mealEl.dataset.meal));
-    if (meal) openEditor({ id: meal.id, title: meal.title, eaten_at: meal.eaten_at, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
+    if (meal) openEditor({ id: meal.id, title: meal.title, eaten_at: meal.eaten_at, photo: meal.photo, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
   }
 });
 app.addEventListener("keydown", (e) => {
   if ((e.key === "Enter" || e.key === " ") && e.target.matches(".meal[data-meal]")) { e.preventDefault(); e.target.click(); }
 });
+// A thumbnail that is gone (kept N days) or fails to load leaves the icon under it visible.
+document.addEventListener("error", (e) => {
+  if (e.target instanceof HTMLImageElement && e.target.matches(".meal-ico img, img.preview")) e.target.remove();
+}, true);
 
 // ---------- reports ----------
 
@@ -812,10 +831,22 @@ function renderStats() {
         ${[["Белки", a.protein, g.protein, "var(--protein)"], ["Жиры", a.fat, g.fat, "var(--fat)"], ["Углеводы", a.carbs, g.carbs, "var(--carbs)"]]
           .map(([n, v, goal, c]) => `<div class="macro"><span class="muted small">${n}</span><b>${r0(v)} / ${goal} г</b>${bar(v, goal, c)}</div>`).join("")}
       </div>
+      ${extraAverages(a, s.refs)}
       <p class="muted small" style="margin:10px 0 0">Среднее считается только по дням, где есть записи.</p>
     </div>
 `;
   $("#weight-form").onsubmit = (e) => { e.preventDefault(); saveWeight(); };
+}
+
+// Fibre and salt against their reference points, sugar as a bare number; each only with data.
+function extraAverages(a, refs) {
+  if (!refs || (a.fiber == null && a.sugar == null && a.salt == null)) return "";
+  const cells = [
+    a.fiber != null ? `<div class="macro"><span class="muted small">Клетчатка</span><b>${r0(a.fiber)} / ${refs.fiber} г</b>${bar(a.fiber, refs.fiber, "var(--fiber)", false)}</div>` : "",
+    a.salt != null ? `<div class="macro"><span class="muted small">Соль</span><b>${gFmt(a.salt)} / ${refs.salt} г</b>${bar(a.salt, refs.salt, "var(--salt)")}</div>` : "",
+    a.sugar != null ? `<div class="macro"><span class="muted small">Сахар</span><b>${r0(a.sugar)} г</b><span class="muted small">весь, не только добавленный</span></div>` : "",
+  ].join("");
+  return `<div class="macros extra">${cells}</div>`;
 }
 
 function energyCard(s) {
@@ -901,9 +932,16 @@ async function saveWeight() {
 // ---------- add: photo / note -> draft ----------
 
 let pendingPhoto = null;
+// The just-taken photo, for a draft that has no stored thumbnail (photos switched off on the server).
+let localPreview = null;
+function dropLocalPreview() {
+  if (localPreview) URL.revokeObjectURL(localPreview.url);
+  localPreview = null;
+}
 
 function openAdd() {
   pendingPhoto = null;
+  dropLocalPreview();
   const stash = stashedDraft();
   const stashKcal = stash ? r0(totalsOf(stash.draft.items).kcal) : 0;
   openSheet(`
@@ -955,7 +993,7 @@ async function logAgain(m) {
   const body = {
     title: m.title,
     items: m.items.map((i) => ({ name: i.name, grams: i.grams, food_id: i.food_id ?? null, source: i.source,
-      kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100 })),
+      kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100, ...extrasOf(i) })),
   };
   try {
     const saved = await api("/api/meals", { method: "POST", json: body });
@@ -969,7 +1007,10 @@ async function logAgain(m) {
   } catch (err) { toast(err.message); }
 }
 
-// A copy of an existing meal as a new, unsaved one eaten now.
+const EXTRA_KEYS = ["fiber_100", "sugar_100", "salt_100"];
+const extrasOf = (i) => Object.fromEntries(EXTRA_KEYS.map((k) => [k, i[k] ?? null]));
+
+// A copy of an existing meal as a new, unsaved one eaten now. The photo stays with the original.
 function repeatMeal(m) {
   // A repeat is the user's own choice, not a recognition: nothing to learn from it.
   openEditor({ title: m.title, items: m.items.map(({ id, ai_grams, ...i }) => ({ ...i, options: [] })), comment: "", today: true });
@@ -1017,14 +1058,15 @@ async function recognizeNow() {
   form.append("note", note);
   sheetBody.innerHTML = '<div class="spinner"></div><p class="center muted">Смотрю на тарелку…</p>';
   try {
-    const draft = await api("/api/recognize", { method: "POST", form });
-    if (state.me) state.me.spent_today = draft.spent_today;
-    if (!draft.items.length) {
+    const d = await api("/api/recognize", { method: "POST", form });
+    if (state.me) state.me.spent_today = d.spent_today;
+    if (!d.items.length) {
       openAdd();
-      $("#add-error").textContent = draft.comment || "Не нашёл еды на фото";
+      $("#add-error").textContent = d.comment || "Не нашёл еды на фото";
       return;
     }
-    openEditor(draft);
+    openEditor(d);
+    if (!d.photo && pendingPhoto) { localPreview = { draft, url: URL.createObjectURL(pendingPhoto) }; renderEditor(); }
   } catch (err) {
     if (err.status === 401) { closeSheet(); return renderAuth(); }
     openAdd();
@@ -1090,8 +1132,10 @@ function itemTotals(it) {
 }
 
 function renderEditor() {
+  const photo = draft.photo ? `/api/photos/${encodeURIComponent(draft.photo)}` : localPreview?.draft === draft ? localPreview.url : "";
   openSheet(`
     <div class="row between"><h2>${draft.id ? "Редактирование" : "Проверь и поправь"}</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    ${photo ? `<img class="preview" src="${esc(photo)}" alt="" decoding="async">` : ""}
     <div class="when">
       ${MEAL_TYPES.map(([name]) => `<button class="chip-btn ${(draft.title || typeOf(draft.time)) === name ? "on" : ""}" data-type="${name}">${name}</button>`).join("")}
       <input type="time" id="time" value="${draft.time}" aria-label="Время">
@@ -1143,7 +1187,10 @@ sheetBody.addEventListener("change", (e) => {
   const idx = Number(e.target.dataset.opt);
   const it = draft.items[idx];
   const o = it.options[Number(e.target.value)];
-  Object.assign(it, { food_id: o.food_id, source: o.source, kcal_100: o.kcal_100, protein_100: o.protein_100, fat_100: o.fat_100, carbs_100: o.carbs_100 });
+  // Same rule as the server's: a database value wins, else the model's estimate stays.
+  const est = it.options.find((x) => x.source === "estimate");
+  Object.assign(it, { food_id: o.food_id, source: o.source, kcal_100: o.kcal_100, protein_100: o.protein_100, fat_100: o.fat_100, carbs_100: o.carbs_100,
+    ...Object.fromEntries(EXTRA_KEYS.map((k) => [k, o[k] ?? est?.[k] ?? null])) });
   renderEditor();
 });
 
@@ -1209,16 +1256,18 @@ async function saveDraft(btn) {
     title: draft.title || "",
     items: items.map((i) => ({
       name: i.name, grams: Number(i.grams), food_id: i.food_id ?? null, source: i.source,
-      kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100,
+      kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100, ...extrasOf(i),
       ai_grams: i.ai_grams ?? null,
     })),
   };
+  // Sent only when there is one: an edit without "photo" keeps the meal's own.
+  if (draft.photo) body.photo = draft.photo;
   // The day the meal belongs to (the viewed day for a new one) at the time in the editor.
   body.eaten_at = `${draft.day}T${draft.time}:00`;
   try {
     await api(draft.id ? `/api/meals/${draft.id}` : "/api/meals", { method: draft.id ? "PUT" : "POST", json: body });
     if (!draft.id) { dropStash(); state.day = draft.day; }
-    draft = null; closeSheet(); toast("Записано"); loadDay();
+    draft = null; dropLocalPreview(); closeSheet(); toast("Записано"); loadDay();
   } catch (err) { btn.disabled = false; toast(err.message); }
 }
 
@@ -1234,6 +1283,13 @@ function openCustomFood(name, barcode = null, note = "") {
       <div class="grow"><label>Белки</label><input name="protein_100" type="text" inputmode="decimal" autocomplete="off" required></div></div>
       <div class="row"><div class="grow"><label>Жиры</label><input name="fat_100" type="text" inputmode="decimal" autocomplete="off" required></div>
       <div class="grow"><label>Углеводы</label><input name="carbs_100" type="text" inputmode="decimal" autocomplete="off" required></div></div>
+      <details class="describe cf-more">
+        <summary>Ещё: клетчатка, сахар, соль</summary>
+        <div class="row"><div class="grow"><label>Клетчатка</label><input name="fiber_100" type="text" inputmode="decimal" autocomplete="off"></div>
+        <div class="grow"><label>Сахар</label><input name="sugar_100" type="text" inputmode="decimal" autocomplete="off"></div>
+        <div class="grow"><label>Соль</label><input name="salt_100" type="text" inputmode="decimal" autocomplete="off"></div></div>
+        <p class="small muted">Необязательно. Пустое поле — «не знаю», а не ноль.</p>
+      </details>
       <button class="primary block" style="margin-top:14px">Добавить</button>
     </form>`);
   draft = null; // keep editor handlers quiet while this form is open
@@ -1243,8 +1299,10 @@ function openCustomFood(name, barcode = null, note = "") {
     const f = Object.fromEntries(new FormData(e.target));
     try {
       const num = (v) => +String(v).replace(",", ".");
+      const opt = (v) => (String(v ?? "").trim() === "" ? null : num(v));
       const food = await api("/api/foods", { method: "POST", json: {
-        name: f.name, kcal_100: num(f.kcal_100), protein_100: num(f.protein_100), fat_100: num(f.fat_100), carbs_100: num(f.carbs_100), barcode } });
+        name: f.name, kcal_100: num(f.kcal_100), protein_100: num(f.protein_100), fat_100: num(f.fat_100), carbs_100: num(f.carbs_100),
+        fiber_100: opt(f.fiber_100), sugar_100: opt(f.sugar_100), salt_100: opt(f.salt_100), barcode } });
       if (back) { draft = back; draft.items.push({ ...food, grams: 100, options: [food] }); renderEditor(); }
       else openEditor({ title: food.name, items: [{ ...food, grams: 100, options: [food] }], comment: "" });
     } catch (err) { toast(err.message); }
@@ -1374,6 +1432,7 @@ const PROFILE_SECTIONS = {
   water: { icon: "drop", title: "Вода" },
   health: { icon: "heart", title: "Apple Health" },
   notify: { icon: "bell", title: "Уведомления" },
+  data: { icon: "download", title: "Данные" },
   admin: { icon: "shield", title: "Админка", admin: true },
 };
 const profileHash = () => location.hash.match(/^#profile\/(\w+)/)?.[1] || null;
@@ -1426,6 +1485,7 @@ function profileValue(key, me, p) {
     const on = [n.evening ? `вечером в ${n.hour}:00` : "", n.weekly ? "обзор недели" : "", n.share_streak ? "серии" : ""].filter(Boolean);
     return on.length ? on.join(" · ") : "выключены";
   }
+  if (key === "data") return "выгрузка в CSV";
   return "пользователи, приглашения, лимиты";
 }
 
@@ -1450,6 +1510,12 @@ function renderProfileScreen(section) {
     water: () => '<div class="card" id="water-card"></div>',
     health: () => '<div class="card" id="health-card"></div>',
     notify: () => '<div class="card" id="notify-card"></div>',
+    // A plain link: the session cookie goes with it, and an iPhone home-screen app can download it.
+    data: () => `<div class="card">
+        <b>Выгрузка дневника</b>
+        <p class="muted small" style="margin:4px 0 12px">Архив с таблицами CSV: все приёмы пищи по продуктам (граммы, КБЖУ, клетчатка, сахар, соль), вес, вода и активность. Открывается в Excel, Numbers и Google Таблицах.</p>
+        <a class="btn primary block with-ico" href="/api/export" download>${ICONS.download}Скачать архив CSV</a>
+      </div>`,
     admin: () => '<div class="card" id="admin"><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div></div>',
   }[key]();
   app.innerHTML = `${topbar(PROFILE_SECTIONS[key].title, me.username, "", "profile-back")}${body}`;

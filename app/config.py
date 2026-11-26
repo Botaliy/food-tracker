@@ -42,6 +42,14 @@ class Settings(BaseSettings):
 
     db_path: str = "data/food.db"
 
+    # Meal photo thumbnails (~20 KB each) are kept this many days; 0 = never stored.
+    photo_keep_days: int = 30
+
+    @property
+    def data_dir(self) -> Path:
+        """Where the database lives; photos sit next to it."""
+        return (BASE_DIR / self.db_path).resolve().parent
+
     @property
     def db_url(self) -> str:
         db_file = (BASE_DIR / self.db_path).resolve()

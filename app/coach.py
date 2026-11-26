@@ -14,7 +14,7 @@ import anthropic
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import diary, energy, review, usage
+from app import diary, energy, foods, review, usage
 from app.config import get_settings
 from app.models import Activity, ChatMessage, Meal, Profile, User, Water, Weight
 from app.recognize import RecognizeError as CoachError
@@ -28,7 +28,7 @@ MAX_MESSAGE_CHARS = 2000
 
 SYSTEM = """Ты — коуч по питанию и здоровым привычкам внутри личного трекера калорий. Общаешься по-русски, на «ты», дружелюбно и по делу.
 
-Перед каждым сообщением приложение даёт свежие данные пользователя: норму, профиль, что съедено сегодня, сводку за 7 дней, вес и его сглаженный тренд, серии, воду и активность. Опирайся на них и называй цифры, когда это помогает. Дни без записей — пропуски в дневнике, а не голодание.
+Перед каждым сообщением приложение даёт свежие данные пользователя: норму, профиль, что съедено сегодня, сводку за 7 дней, вес и его сглаженный тренд, серии, воду и активность. Опирайся на них и называй цифры, когда это помогает. Дни без записей — пропуски в дневнике, а не голодание. Клетчатка, сахар и соль (fiber, sugar, salt в граммах) известны не для всех продуктов — это нижняя оценка, null значит «нет данных»; ориентиры в reference_per_day (клетчатка 14 г на 1000 ккал, соль до 5 г). Сахар — весь сахар, включая фруктовый и молочный, а не только добавленный; не ругай за него, если это фрукты и молочное.
 
 Как отвечать:
 - Коротко: обычно 2–6 предложений или короткий список. Длиннее — только если просят план или разбор.
@@ -76,6 +76,7 @@ def snapshot(db: Session, user: User) -> dict:
             eaten["protein"] += i.protein_100 * k
             eaten["fat"] += i.fat_100 * k
             eaten["carbs"] += i.carbs_100 * k
+    extra = foods.extra_totals([i for m in today_meals for i in m.items])
     water = db.scalar(select(Water).where(Water.user_id == user.id, Water.day == today))
     return {
         "now_local": diary.today(user).isoformat(),
@@ -85,8 +86,11 @@ def snapshot(db: Session, user: User) -> dict:
             "goal_weight_kg": profile.goal_weight_kg,
         },
         "goals_per_day": goals,
+        "reference_per_day": week["reference_per_day"],
         "today": {
             "eaten": {k: round(v) for k, v in eaten.items()},
+            # Only for items that have the values; None = nothing known today.
+            "eaten_extra_g": {k: None if v is None else round(v, 1) for k, v in extra.items()},
             "left": {k: round(goals[k] - eaten[k]) for k in goals},
             "meals": [{"time": m.eaten_at.isoformat(), "title": m.title,
                        "items": [f"{i.name} {round(i.grams)} г" for i in m.items]} for m in today_meals],

@@ -11,12 +11,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app import usage
+from app import diary, usage
 from app.models import Meal, User
 
 WINDOW_DAYS = 14
 MIN_DAYS = 5
 EVENING_HOUR = 18
+FIBER_LOW = 0.7      # of the reference, on average over days that have fibre data
+MIN_FIBER_DAYS = 3
 
 
 def _totals(items) -> tuple[float, float]:
@@ -43,13 +45,15 @@ def observations(db: Session, user: User, today: date) -> list[dict]:
     for m in _meals(db, user, today - timedelta(days=WINDOW_DAYS), last):
         local = m.eaten_at.replace(tzinfo=UTC).astimezone(zone)
         kcal, protein = _totals(m.items)
-        d = days.setdefault(local.date(), {"kcal": 0.0, "evening": 0.0, "breakfast_protein": None})
+        d = days.setdefault(local.date(), {"kcal": 0.0, "evening": 0.0, "breakfast_protein": None, "fiber": None})
         d["kcal"] += kcal
         if local.hour >= EVENING_HOUR:
             d["evening"] += kcal
         if local.hour < 11:
             d["breakfast_protein"] = (d["breakfast_protein"] or 0) + protein
         for i in m.items:
+            if i.fiber_100 is not None:
+                d["fiber"] = (d["fiber"] or 0.0) + i.fiber_100 * i.grams / 100
             key = i.name.strip()
             foods[key] = foods.get(key, 0.0) + i.kcal_100 * i.grams / 100
     if len(days) < MIN_DAYS:
@@ -74,6 +78,12 @@ def observations(db: Session, user: User, today: date) -> list[dict]:
         diff = sum(weekend) / len(weekend) - sum(weekday) / len(weekday)
         if diff >= 300:
             out.append({"icon": "party", "text": f"В выходные в среднем на {round(diff)} ккал больше, чем в будни."})
+
+    fibers = [d["fiber"] for d in days.values() if d["fiber"] is not None]
+    target = diary.nutrient_refs(user.kcal_goal)["fiber"]
+    if len(fibers) >= MIN_FIBER_DAYS and sum(fibers) / len(fibers) < FIBER_LOW * target:
+        out.append({"icon": "wheat", "text": f"Клетчатки в среднем {round(sum(fibers) / len(fibers))} г в день "
+                                           f"при ориентире {target} г. Овощи, бобовые, цельнозерновой хлеб и каши добавят её."})
 
     if foods:
         name, kcal = max(foods.items(), key=lambda kv: kv[1])
