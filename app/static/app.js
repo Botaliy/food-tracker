@@ -95,8 +95,9 @@ function inviteFromUrl() {
 
 function renderAuth(error = "") {
   const invite = inviteFromUrl();
+  $("#tabbar").hidden = true;
   app.innerHTML = `
-    <h1>${invite ? "Регистрация" : "Вход"}</h1>
+    <div class="brand"><div class="brand-ico">🥗</div><h1>${invite ? "Регистрация" : "Вход"}</h1><p class="muted small">Калории и БЖУ по фото еды</p></div>
     <form class="card" id="auth-form">
       <label>Логин</label>
       <input name="username" autocomplete="username" autocapitalize="none" required>
@@ -140,41 +141,101 @@ function bar(value, goal, color) {
   return `<div class="bar ${value > goal * 1.05 ? "over" : ""}" style="--c:${color}"><i style="width:${pct}%"></i></div>`;
 }
 
+// Stroke icons, 24x24, drawn in currentColor.
+const svgIcon = (d) => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">${d}</svg>`;
+const ICON = {
+  diary: svgIcon('<path d="M6 3.5h10.5A2.5 2.5 0 0 1 19 6v14.5H7.5A2.5 2.5 0 0 1 5 18V4.5a1 1 0 0 1 1-1z"/><path d="M5 18a2.5 2.5 0 0 1 2.5-2.5H19M9 8h6"/>'),
+  chart: svgIcon('<path d="M4 20h16M7 16v-5M12 16V6M17 16v-8"/>'),
+  settings: svgIcon('<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>'),
+  left: svgIcon('<path d="M14.5 6l-6 6 6 6"/>'),
+  right: svgIcon('<path d="M9.5 6l6 6-6 6"/>'),
+  plus: svgIcon('<path d="M12 5v14M5 12h14"/>'),
+};
+
+function ring(value, goal, color, size, width, inner = "", warnOver = false) {
+  const r = (size - width) / 2, c = 2 * Math.PI * r, mid = size / 2;
+  const frac = goal > 0 ? Math.min(1, value / goal) : 0;
+  const over = warnOver && value > goal * 1.05;
+  return `<div class="ring" style="width:${size}px;height:${size}px">
+    <svg viewBox="0 0 ${size} ${size}" aria-hidden="true">
+      <circle class="track" cx="${mid}" cy="${mid}" r="${r}" stroke-width="${width}"/>
+      <circle class="val ${over ? "over" : ""}" cx="${mid}" cy="${mid}" r="${r}" stroke-width="${width}" stroke="${color}"
+        stroke-linecap="${frac > 0 ? "round" : "butt"}" stroke-dasharray="${(c * frac).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 ${mid} ${mid})"/>
+    </svg>
+    <div class="ring-in">${inner}</div>
+  </div>`;
+}
+
+function topbar(title, subtitle, buttons) {
+  return `<header class="top">
+    <div class="grow"><h1>${esc(title)}</h1><div class="muted small">${esc(subtitle)}</div></div>
+    <div class="row tight">${buttons}</div>
+  </header>`;
+}
+
+const tabbar = $("#tabbar");
+function showTabs(active) {
+  tabbar.innerHTML = `
+    <button data-tab="day" class="${active === "day" ? "on" : ""}">${ICON.diary}<span>Дневник</span></button>
+    <button data-tab="add" class="add" aria-label="Добавить еду">${ICON.plus}</button>
+    <button data-tab="reports" class="${active === "reports" ? "on" : ""}">${ICON.chart}<span>Отчёты</span></button>`;
+  tabbar.hidden = false;
+}
+tabbar.addEventListener("click", (e) => {
+  const tab = e.target.closest("[data-tab]")?.dataset.tab;
+  if (tab === "add") openAdd();
+  else if (tab === "day") { state.day = isoDate(new Date()); loadDay(); }
+  else if (tab === "reports") loadStats();
+});
+
 function renderDay() {
   const { meals, totals: t, goals: g } = state.dayData;
   const isToday = state.day === isoDate(new Date());
   const left = g.kcal - t.kcal;
+  const d = new Date(state.day + "T12:00");
+  const label = dayLabel(state.day);
+  const sameWeekday = label !== "Сегодня" && label !== "Вчера";
+  showTabs("day");
   app.innerHTML = `
-    <div class="daynav">
-      <button class="ghost" data-act="prev" aria-label="Предыдущий день">‹</button>
-      <h1>${esc(dayLabel(state.day))}</h1>
-      <div class="row">
-        <button class="ghost" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>›</button>
-        <button class="ghost" data-act="reports" aria-label="Отчёты">📊</button>
-        <button class="ghost" data-act="settings" aria-label="Настройки">⚙︎</button>
+    ${topbar(sameWeekday ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : label,
+      d.toLocaleDateString("ru-RU", sameWeekday ? { weekday: "long" } : { weekday: "long", day: "numeric", month: "long" }),
+      `<button class="icon" data-act="prev" aria-label="Предыдущий день">${ICON.left}</button>
+       <button class="icon" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>${ICON.right}</button>
+       <button class="icon" data-act="settings" aria-label="Настройки">${ICON.settings}</button>`)}
+    <div class="card summary">
+      <div class="sum-main">
+        ${ring(t.kcal, g.kcal, "var(--accent)", 136, 13,
+          `<b>${r0(Math.abs(left))}</b><span class="muted">${left >= 0 ? "осталось" : "перебор"}</span>`, true)}
+        <div class="sum-stats">
+          <div><span class="muted small">Съедено</span><b>${r0(t.kcal)} <small>ккал</small></b></div>
+          <div><span class="muted small">Норма</span><b>${g.kcal} <small>ккал</small></b></div>
+        </div>
       </div>
-    </div>
-    <div class="card">
-      <div class="row between">
-        <div class="kcal-big">${r0(t.kcal)} <small>/ ${g.kcal} ккал</small></div>
-        <div class="muted small">${left >= 0 ? `осталось ${r0(left)}` : `перебор ${r0(-left)}`}</div>
-      </div>
-      ${bar(t.kcal, g.kcal)}
       <div class="macros">
         ${[["Белки", t.protein, g.protein, "var(--protein)"], ["Жиры", t.fat, g.fat, "var(--fat)"], ["Углеводы", t.carbs, g.carbs, "var(--carbs)"]]
-          .map(([n, v, goal, c]) => `<div class="macro"><span class="muted small">${n}</span><b>${r0(v)} / ${goal} г</b>${bar(v, goal, c)}</div>`).join("")}
+          .map(([n, v, goal, c]) => `<div class="macro">${ring(v, goal, c, 62, 7, `<b>${r0(v)}</b>`)}
+            <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
     </div>
-    ${meals.length ? meals.map(mealCard).join("") : '<div class="empty">Пока ничего не записано.<br>Сфотографируй, что собираешься съесть.</div>'}
-    <button class="fab" data-act="add">＋ Добавить еду</button>`;
+    ${meals.length
+      ? `<h3 class="sub">Приёмы пищи</h3>${meals.map(mealCard).join("")}`
+      : `<div class="empty"><div class="empty-ico">📸</div><b>Пока пусто</b>
+          <p>Нажми «+» внизу и сфотографируй еду — посчитаю калории и БЖУ.</p></div>`}`;
 }
 
+const PART_OF_DAY = [[5, "🌙", "Перекус"], [11, "🍳", "Завтрак"], [16, "🍲", "Обед"], [22, "🍽️", "Ужин"], [24, "🌙", "Перекус"]];
+
 function mealCard(m) {
-  const time = new Date(m.eaten_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const at = new Date(m.eaten_at);
+  const time = at.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+  const [, icon, name] = PART_OF_DAY.find(([until]) => at.getHours() < until);
   return `<div class="card meal" data-meal="${m.id}">
-    <div class="meal-head"><span>${esc(m.title || "Приём пищи")} <span class="muted small">${time}</span></span><span>${r0(m.totals.kcal)} ккал</span></div>
-    <div class="meal-items">${m.items.map((i) => `${esc(i.name)} ${r0(i.grams)} г`).join(" · ")}</div>
-    <div class="small muted">Б ${r0(m.totals.protein)} · Ж ${r0(m.totals.fat)} · У ${r0(m.totals.carbs)}</div>
+    <div class="meal-ico">${icon}</div>
+    <div class="grow">
+      <div class="meal-head"><span class="meal-title">${esc(m.title || name)}</span><span class="meal-kcal">${r0(m.totals.kcal)} <small>ккал</small></span></div>
+      <div class="meal-items">${m.items.map((i) => `${esc(i.name)} ${r0(i.grams)} г`).join(" · ")}</div>
+      <div class="meal-meta">${time} · <i style="--c:var(--protein)"></i>Б ${r0(m.totals.protein)} <i style="--c:var(--fat)"></i>Ж ${r0(m.totals.fat)} <i style="--c:var(--carbs)"></i>У ${r0(m.totals.carbs)}</div>
+    </div>
   </div>`;
 }
 
@@ -293,12 +354,10 @@ function renderStats() {
   const sel = s.days.find((d) => d.date === state.selected);
   const todayW = s.weights.find((w) => w.date === s.to);
   const delta = s.weights.length >= 2 ? r1(s.weights.at(-1).kg - s.weights[0].kg) : null;
+  showTabs("reports");
   app.innerHTML = `
-    <div class="daynav">
-      <button class="ghost" data-act="back" aria-label="Назад">‹</button>
-      <h1>Отчёты</h1>
-      <button class="ghost" data-act="settings" aria-label="Настройки">⚙︎</button>
-    </div>
+    ${topbar("Отчёты", `${shortDate(s.from)} — ${shortDate(s.to)}`,
+      `<button class="icon" data-act="settings" aria-label="Настройки">${ICON.settings}</button>`)}
     <div class="seg">${PERIODS.map(([d, l]) => `<button data-act="period" data-days="${d}" class="${d === state.statsDays ? "on" : ""}">${l}</button>`).join("")}</div>
     <div class="tiles">
       <div class="tile"><span class="muted small">Серия</span><b>${s.streak}</b><span class="muted small">${plural(s.streak, "день", "дня", "дней")} подряд</span></div>
