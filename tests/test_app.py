@@ -1,0 +1,192 @@
+import json
+import zipfile
+
+import pytest
+
+from app import foods, recognize as recognize_mod
+from app.models import ApiCall
+from scripts import import_usda
+from tests.conftest import add_food, fake_response, make_user
+
+RECOGNITION = {
+    "title": "Курица с рисом",
+    "comment": "Масло не видно",
+    "items": [
+        {"name_ru": "Куриная грудка", "name_en": "chicken breast roasted", "grams": 150,
+         "kcal_100": 170, "protein_100": 30, "fat_100": 4, "carbs_100": 0, "confidence": "high"},
+        {"name_ru": "Рис", "name_en": "rice white cooked", "grams": 180,
+         "kcal_100": 130, "protein_100": 2.7, "fat_100": 0.3, "carbs_100": 28, "confidence": "medium"},
+        {"name_ru": "Соус терияки", "name_en": "teriyaki sauce", "grams": 20,
+         "kcal_100": 90, "protein_100": 6, "fat_100": 0, "carbs_100": 16, "confidence": "low"},
+    ],
+}
+
+
+class FakeClient:
+    def __init__(self, response):
+        self.response = response
+        self.kwargs = None
+        outer = self
+
+        class Messages:
+            def create(self, **kwargs):
+                outer.kwargs = kwargs
+                return outer.response
+
+        self.beta = type("Beta", (), {"messages": Messages()})()
+
+
+@pytest.fixture
+def fake_model(monkeypatch):
+    holder = {"client": FakeClient(fake_response(json.dumps(RECOGNITION)))}
+    real = recognize_mod.recognize
+    monkeypatch.setattr("app.routers.api.recognize", lambda img, note: real(img, note, client=holder["client"]))
+    return holder
+
+
+# ---------- food matching ----------
+
+def test_search_and_pick_prefers_plausible_calories(db):
+    skin = add_food(db, "Chicken, broilers or fryers, skin only, roasted", 454)
+    breast = add_food(db, "Chicken, broilers or fryers, breast, meat only, roasted", 165, 31, 3.6)
+    found = foods.search(db, "chicken breast roasted", user_id=None)
+    assert breast in found and skin in found
+    assert foods.pick(found, foods.Per100(170, 30, 4, 0)) == breast
+
+
+def test_pick_rejects_far_off_match(db):
+    add_food(db, "Butter, salted", 717)
+    found = foods.search(db, "butter", user_id=None)
+    assert foods.pick(found, foods.Per100(80, 1, 2, 10)) is None
+
+
+def test_custom_foods_are_private(db):
+    a, b = make_user(db, "anna"), make_user(db, "boris")
+    add_food(db, "Бабушкин пирог", 300, source="custom", owner_id=a.id)
+    assert foods.search(db, "пирог", user_id=a.id)
+    assert not foods.search(db, "пирог", user_id=b.id)
+
+
+# ---------- recognition ----------
+
+def test_recognize_builds_draft_from_database(client, db, fake_model):
+    breast = add_food(db, "Chicken, broilers or fryers, breast, meat only, roasted", 165, 31, 3.6, 0)
+    add_food(db, "Rice, white, long-grain, regular, enriched, cooked", 130, 2.7, 0.3, 28)
+
+    r = client.post("/api/recognize", data={"note": "обед"}, files={"photo": ("m.jpg", _jpeg(), "image/jpeg")})
+    assert r.status_code == 200, r.text
+    draft = r.json()
+    chicken, rice, sauce = draft["items"]
+    assert chicken["food_id"] == breast.id and chicken["source"] == "usda"
+    assert chicken["name"] == "Куриная грудка" and chicken["grams"] == 150
+    assert rice["source"] == "usda"
+    assert sauce["source"] == "estimate" and sauce["kcal_100"] == 90
+    assert draft["cost_usd"] == pytest.approx((2000 * 2 + 500 * 10) / 1e6)
+
+    sent = fake_model["client"].kwargs
+    assert sent["model"] == "claude-sonnet-5-5"
+    assert sent["fallbacks"] == "default"
+    assert sent["output_config"]["format"]["type"] == "json_schema"
+    assert sent["messages"][0]["content"][0]["type"] == "image"
+
+
+def test_daily_limit_blocks_further_calls(client, db, fake_model):
+    # Limit is $0.05 in tests; a call above costs ~$0.009, so six calls cross it.
+    for _ in range(6):
+        assert client.post("/api/recognize", data={"note": "яблоко"}).status_code == 200
+    r = client.post("/api/recognize", data={"note": "яблоко"})
+    assert r.status_code == 429
+    assert db.query(ApiCall).count() == 6
+
+
+def test_refusal_is_billed_and_reported(client, db, fake_model):
+    fake_model["client"].response = fake_response("", stop_reason="refusal")
+    r = client.post("/api/recognize", data={"note": "что-то"})
+    assert r.status_code == 502
+    call = db.query(ApiCall).one()
+    assert call.error and call.cost_usd > 0
+
+
+def test_recognize_needs_photo_or_note(client, fake_model):
+    assert client.post("/api/recognize", data={"note": "  "}).status_code == 502
+
+
+# ---------- diary ----------
+
+def test_meal_uses_database_numbers_and_sums_the_day(client, db):
+    rice = add_food(db, "Rice, white, cooked", 130, 2.7, 0.3, 28)
+    body = {"title": "Обед", "items": [
+        # A tampered client can't change a database food's numbers.
+        {"name": "Рис", "grams": 200, "food_id": rice.id, "source": "usda",
+         "kcal_100": 800, "protein_100": 0, "fat_100": 0, "carbs_100": 0},
+        {"name": "Соус", "grams": 50, "source": "estimate",
+         "kcal_100": 100, "protein_100": 0, "fat_100": 10, "carbs_100": 2},
+    ]}
+    meal = client.post("/api/meals", json=body).json()
+    assert meal["totals"]["kcal"] == pytest.approx(260 + 50)
+
+    day = client.get("/api/day").json()
+    assert len(day["meals"]) == 1
+    assert day["totals"]["fat"] == pytest.approx(0.6 + 5)
+
+    meal_id = meal["id"]
+    body["items"] = body["items"][:1]
+    assert client.put(f"/api/meals/{meal_id}", json=body).json()["totals"]["kcal"] == 260
+    assert client.delete(f"/api/meals/{meal_id}").status_code == 200
+    assert client.get("/api/day").json()["meals"] == []
+
+
+def test_cannot_touch_someone_elses_meal(client, db):
+    meal = client.post("/api/meals", json={"items": [
+        {"name": "x", "grams": 10, "kcal_100": 1, "protein_100": 0, "fat_100": 0, "carbs_100": 0}]}).json()
+    make_user(db, "boris")
+    client.post("/api/auth/logout")
+    client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
+    assert client.delete(f"/api/meals/{meal['id']}").status_code == 404
+
+
+# ---------- invites ----------
+
+def test_invite_flow(client):
+    code = client.post("/api/admin/invites").json()["code"]
+    client.post("/api/auth/logout")
+    r = client.post("/api/auth/register", json={"invite": code, "username": "Vera", "password": "longpass1", "timezone": "Asia/Nicosia"})
+    assert r.status_code == 200
+    assert r.json()["username"] == "vera" and r.json()["timezone"] == "Asia/Nicosia"
+    assert not r.json()["is_admin"]
+    assert client.get("/api/admin/users").status_code == 403
+    client.post("/api/auth/logout")
+    again = client.post("/api/auth/register", json={"invite": code, "username": "other", "password": "longpass1"})
+    assert again.status_code == 400
+
+
+def test_api_requires_login():
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as c:
+        assert c.get("/api/day").status_code == 401
+        assert c.get("/").status_code == 200
+
+
+# ---------- USDA import ----------
+
+def test_import_usda(tmp_path, db):
+    path = tmp_path / "sr.zip"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("sr/food.csv", 'fdc_id,data_type,description\n1,sr_legacy_food,"Egg, whole, raw"\n2,sr_legacy_food,"Water"\n')
+        zf.writestr("sr/food_nutrient.csv",
+                    "id,fdc_id,nutrient_id,amount\n"
+                    "1,1,1008,143\n2,1,1003,12.6\n3,1,1004,9.5\n4,1,1005,0.7\n5,2,1008,0\n")
+    import_usda.main([str(path)])
+    found = foods.search(db, "egg raw", user_id=None)
+    assert len(found) == 1 and found[0].kcal == 143 and found[0].protein == 12.6
+
+
+def _jpeg() -> bytes:
+    import io
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (2400, 1800), "orange").save(buf, format="JPEG")
+    return buf.getvalue()

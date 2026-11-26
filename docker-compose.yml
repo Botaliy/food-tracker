@@ -1,0 +1,30 @@
+# The docker default keeps logs forever.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+services:
+  food-tracker:
+    build: .
+    container_name: food-tracker
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    expose:
+      - "8000"
+    # The VPS has 1 GB shared with expense-tracker, tg-assistant and greek-cards.
+    # ~130 MB idle (the anthropic SDK is most of it), +40 MB while a photo is shrunk.
+    mem_limit: 250m
+    logging: *logging
+    networks:
+      - web
+
+# expense-tracker's nginx terminates TLS for every app on this server and
+# reaches this container by name over its network.
+networks:
+  web:
+    external: true
+    name: expense-tracker_default

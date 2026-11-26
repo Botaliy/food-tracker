@@ -1,0 +1,33 @@
+[project]
+name = "food-tracker"
+version = "0.1.0"
+description = "Calories and macros from a photo of a meal, for a few friends"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "sqlalchemy>=2.0",
+    "python-multipart>=0.0.12",
+    "anthropic>=1.0",
+    "bcrypt>=4.1",
+    "itsdangerous>=2.2",
+    "pydantic-settings>=2.6",
+    "pillow>=12.0",
+    "tzdata>=2026.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
