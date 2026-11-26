@@ -808,3 +808,22 @@ def test_coach_daily_cap_and_spend_limit(client, db, fake_coach, monkeypatch):
     monkeypatch.setattr(get_settings(), "default_daily_limit_usd", 0.0001)
     assert client.post("/api/coach", json={"text": "ещё"}).status_code == 429
     assert db.query(ApiCall).count() == 1
+
+
+def test_health_accepts_shortcut_formats(client):
+    from fastapi.testclient import TestClient
+    token = client.post("/api/profile/health-token").json()["token"]
+    h = {"Authorization": f"Bearer {token}"}
+    with TestClient(client.app) as anon:
+        # Text with units and a decimal comma, thousands with a narrow space, a weight list.
+        r = anon.post("/api/health", headers=h, json={"active_kcal": "512,3 ккал", "steps": "8 400", "weight_kg": ["81,2", "80,9 кг"]})
+        assert r.status_code == 200, r.text
+        assert client.get("/api/day").json()["activity"] == {"active_kcal": 512.3, "steps": 8400}
+        assert client.get("/api/day").json()["weight"]["today"] == 80.9
+        # A list of samples is summed; a full date-time is fine; form fields work too.
+        anon.post("/api/health", headers=h, json={"steps": [1000, "2 500"], "date": f"{_local_today()}T23:50:00+01:00"})
+        assert client.get("/api/day").json()["activity"]["steps"] == 3500
+        anon.post("/api/health", headers=h, data={"active_kcal": "600.5"})
+        assert client.get("/api/day").json()["activity"]["active_kcal"] == 600.5
+        bad = anon.post("/api/health", headers=h, json={"active_kcal": "много", "steps": None})
+        assert bad.status_code == 400 and "active_kcal" in bad.json()["detail"]

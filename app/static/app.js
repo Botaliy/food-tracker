@@ -1374,7 +1374,6 @@ function renderHealth(h, token = null) {
         <li>«Найти образцы здоровья»: тип «Активная энергия», дата начала — «Сегодня». Затем «Вычислить статистику» → «Сумма».</li>
         <li>То же для типа «Шаги».</li>
         <li>«Получить содержимое URL»: адрес выше, метод POST, заголовок Authorization со значением выше, тело JSON: <code>active_kcal</code> — первая сумма, <code>steps</code> — вторая (оба «Число»).</li>
-        <li>Вес можно не отправлять — пиши его в отчётах. Если взвешиваешься в «Здоровье», добавь <code>weight_kg</code>.</li>
       </ol>
       <button class="block" id="health-done">Готово</button>`;
     box.querySelectorAll("[data-copy-text]").forEach((b) => b.addEventListener("click", async () => {
@@ -1387,7 +1386,7 @@ function renderHealth(h, token = null) {
     <b>⌚ Apple Watch и «Здоровье»</b>
     <p class="muted small" style="margin:4px 0 10px">${h.connected
       ? (h.last_day ? `Подключено. Последние данные — ${esc(dayLabel(h.last_day).toLowerCase())}.` : "Ключ выдан, данных пока не было.")
-      : "Команда на iPhone раз в день отправляет активные калории и шаги. Они появятся в дневнике, отчётах и обзоре недели."}</p>
+      : "Команда на iPhone раз в день отправляет активные калории и шаги. Они появятся в дневнике, отчётах и обзоре недели. Вес пиши в приложении."}</p>
     <button class="block" id="health-token">${h.connected ? "Выдать новый ключ" : "Подключить"}</button>
     ${h.connected ? '<button class="block danger" id="health-off" style="margin-top:8px">Отключить</button>' : ""}`;
   $("#health-token").onclick = async () => {

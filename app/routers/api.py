@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import json
+import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -709,37 +710,80 @@ def drop_health_token(user: User = Depends(auth.current_user), db: Session = Dep
     return {"ok": True}
 
 
-class HealthIn(BaseModel):
-    day: date | None = Field(None, alias="date")
-    active_kcal: float | None = Field(None, ge=0, le=10000)
-    steps: int | None = Field(None, ge=0, le=200000)
-    weight_kg: float | None = Field(None, ge=20, le=400)
+_NUMBER = re.compile(r"-?\d[\d\s\u00a0\u202f]*(?:[.,]\d+)?")
+
+
+def _number(value, combine=sum) -> float | None:
+    """A number the way Shortcuts may send it: 512.3, "512,3 kcal", "8 400", or a list of
+    samples (summed, or for weight the last one), or {"value": ...}."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, dict):
+        return _number(value.get("value") or value.get("quantity"), combine)
+    if isinstance(value, list):
+        nums = [n for n in (_number(v, combine) for v in value) if n is not None]
+        return combine(nums) if nums else None
+    m = _NUMBER.search(str(value))
+    if not m:
+        return None
+    return float(re.sub(r"[\s\u00a0\u202f]", "", m.group()).replace(",", "."))
+
+
+def _health_day(value) -> date | None:
+    """"2026-11-26", or a full date-time; anything else means today."""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", str(value or ""))
+    try:
+        return date.fromisoformat(m.group()) if m else None
+    except ValueError:
+        return None
+
+
+async def _health_payload(request: Request) -> dict:
+    """JSON or form fields: the Shortcut's "Request Body" can be either."""
+    raw = await request.body()
+    try:
+        data = json.loads(raw) if raw.strip().startswith(b"{") else dict(await request.form())
+    except (ValueError, UnicodeDecodeError):
+        data = {}
+    return data if isinstance(data, dict) else {}
 
 
 @router.post("/health")
-def receive_health(body: HealthIn, authorization: str = Header(""), db: Session = Depends(get_db)):
+async def receive_health(request: Request, authorization: str = Header(""), db: Session = Depends(get_db)):
     """Called by the Shortcut, not the app: the key in the header stands in for the session."""
     token = authorization.removeprefix("Bearer ").strip()
     profile = db.scalar(select(Profile).where(Profile.health_token_hash == _token_hash(token))) if token else None
     if profile is None:
         raise HTTPException(status_code=401, detail="Неверный ключ")
+    data = await _health_payload(request)
+    kcal = _number(data.get("active_kcal"))
+    steps = _number(data.get("steps"))
+    weight = _number(data.get("weight_kg"), combine=lambda xs: xs[-1])
+    kcal = kcal if kcal is not None and 0 <= kcal <= 10000 else None
+    steps = int(steps) if steps is not None and 0 <= steps <= 200000 else None
+    weight = weight if weight is not None and 20 <= weight <= 400 else None
+    if kcal is None and steps is None and weight is None:
+        logger.warning("Health payload not understood: %s", (await request.body())[:500])
+        raise HTTPException(status_code=400, detail=f"Не нашёл чисел active_kcal, steps или weight_kg в запросе: {str(data)[:200]}")
     user = db.get(User, profile.user_id)
     today = _today(user)
-    d = body.day or today
+    d = _health_day(data.get("date")) or today
     if d > today or d < today - timedelta(days=30):
         raise HTTPException(status_code=400, detail="Дата должна быть за последние 30 дней")
-    if body.active_kcal is not None or body.steps is not None:
+    if kcal is not None or steps is not None:
         a = db.scalar(select(Activity).where(Activity.user_id == user.id, Activity.day == d))
         if a is None:
             a = Activity(user_id=user.id, day=d)
             db.add(a)
         # A field the Shortcut didn't send keeps what was there.
-        if body.active_kcal is not None:
-            a.active_kcal = round(body.active_kcal, 1)
-        if body.steps is not None:
-            a.steps = body.steps
-    if body.weight_kg is not None:
-        _upsert_weight(db, user, d, round(body.weight_kg, 1))
+        if kcal is not None:
+            a.active_kcal = round(kcal, 1)
+        if steps is not None:
+            a.steps = steps
+    if weight is not None:
+        _upsert_weight(db, user, d, round(weight, 1))
     db.commit()
     return {"ok": True, "date": d.isoformat()}
 
