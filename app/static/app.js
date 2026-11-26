@@ -147,7 +147,7 @@ function renderAuth(error = "") {
         ? await api("/api/auth/register", { method: "POST", json: { ...body, invite } })
         : await api("/api/auth/login", { method: "POST", json: body });
       history.replaceState(null, "", "/");
-      await loadDay();
+      if (!state.me.onboarded) renderOnboarding(1); else await loadDay();
     } catch (err) {
       renderAuth(err.message);
     }
@@ -183,6 +183,8 @@ const ICON = {
   left: svgIcon('<path d="M14.5 6l-6 6 6 6"/>'),
   right: svgIcon('<path d="M9.5 6l6 6-6 6"/>'),
   plus: svgIcon('<path d="M12 5v14M5 12h14"/>'),
+  user: svgIcon('<circle cx="12" cy="8.5" r="3.5"/><path d="M5 20c1.2-3.6 4-5.5 7-5.5s5.8 1.9 7 5.5"/>'),
+  chat: svgIcon('<path d="M4.5 6.5A2.5 2.5 0 0 1 7 4h10a2.5 2.5 0 0 1 2.5 2.5v7A2.5 2.5 0 0 1 17 16h-6l-4.5 3.5V16H7a2.5 2.5 0 0 1-2.5-2.5z"/><path d="M8.5 9h7M8.5 12h4"/>'),
 };
 
 function ring(value, goal, color, size, width, inner = "", warnOver = false) {
@@ -208,10 +210,13 @@ function topbar(title, subtitle, buttons) {
 
 const tabbar = $("#tabbar");
 function showTabs(active) {
+  const tab = (id, icon, label) => `<button data-tab="${id}" class="${active === id ? "on" : ""}">${icon}<span>${label}</span></button>`;
   tabbar.innerHTML = `
-    <button data-tab="day" class="${active === "day" ? "on" : ""}">${ICON.diary}<span>Дневник</span></button>
+    ${tab("day", ICON.diary, "Дневник")}
+    ${tab("reports", ICON.chart, "Отчёты")}
     <button data-tab="add" class="add" aria-label="Добавить еду">${ICON.plus}</button>
-    <button data-tab="reports" class="${active === "reports" ? "on" : ""}">${ICON.chart}<span>Отчёты</span></button>`;
+    ${tab("coach", ICON.chat, "Коуч")}
+    ${tab("profile", ICON.user, "Профиль")}`;
   tabbar.hidden = false;
 }
 tabbar.addEventListener("click", (e) => {
@@ -219,7 +224,17 @@ tabbar.addEventListener("click", (e) => {
   if (tab === "add") openAdd();
   else if (tab === "day") { state.day = isoDate(new Date()); loadDay(); }
   else if (tab === "reports") loadStats();
+  else if (tab === "coach") loadCoach();
+  else if (tab === "profile") loadProfileView();
 });
+
+// Re-render whatever screen is open after something changed underneath it.
+function refreshView() {
+  if (state.view === "reports") return loadStats();
+  if (state.view === "profile") return loadProfileView();
+  if (state.view === "onboarding") return renderOnboarding(state.onboardingStep + 1);
+  return loadDay();
+}
 
 function renderDay() {
   const { meals, totals: t, goals: g } = state.dayData;
@@ -233,8 +248,7 @@ function renderDay() {
     ${topbar(sameWeekday ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long" }) : label,
       d.toLocaleDateString("ru-RU", sameWeekday ? { weekday: "long" } : { weekday: "long", day: "numeric", month: "long" }),
       `<button class="icon" data-act="prev" aria-label="Предыдущий день">${ICON.left}</button>
-       <button class="icon" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>${ICON.right}</button>
-       <button class="icon" data-act="settings" aria-label="Настройки">${ICON.settings}</button>`)}
+       <button class="icon" data-act="next" aria-label="Следующий день" ${isToday ? "disabled" : ""}>${ICON.right}</button>`)}
     <div class="card summary">
       <div class="sum-main">
         ${ring(t.kcal, g.kcal, "var(--accent)", 136, 13,
@@ -321,7 +335,7 @@ app.addEventListener("click", (e) => {
   } else if (act === "add") {
     openAdd();
   } else if (act === "settings") {
-    openSettings();
+    loadProfileView();
   } else if (mealEl) {
     const meal = state.dayData.meals.find((m) => m.id === Number(mealEl.dataset.meal));
     if (meal) openEditor({ id: meal.id, title: meal.title, eaten_at: meal.eaten_at, items: meal.items.map((i) => ({ ...i, options: [] })), comment: "" });
@@ -409,8 +423,7 @@ function renderStats() {
   const delta = s.weights.length >= 2 ? r1(s.weights.at(-1).kg - s.weights[0].kg) : null;
   showTabs("reports");
   app.innerHTML = `
-    ${topbar("Отчёты", `${shortDate(s.from)} — ${shortDate(s.to)}`,
-      `<button class="icon" data-act="settings" aria-label="Настройки">${ICON.settings}</button>`)}
+    ${topbar("Отчёты", `${shortDate(s.from)} — ${shortDate(s.to)}`, "")}
     <div class="seg">${PERIODS.map(([d, l]) => `<button data-act="period" data-days="${d}" class="${d === state.statsDays ? "on" : ""}">${l}</button>`).join("")}</div>
     <div class="tiles">
       <div class="tile"><span class="muted small">Серия</span><b>${s.streak}</b><span class="muted small">${plural(s.streak, "день", "дня", "дней")} подряд</span></div>
@@ -988,39 +1001,98 @@ async function findBarcode(raw) {
 
 // ---------- settings & admin ----------
 
-async function openSettings() {
-  const me = state.me || (state.me = await api("/api/me"));
-  const g = me.goals;
-  openSheet(`
-    <div class="row between"><h2>Настройки</h2><button class="ghost" data-close aria-label="Закрыть">✕</button></div>
+async function loadProfileView() {
+  state.view = "profile";
+  try { state.me = await api("/api/me"); } catch (err) { if (err.status === 401) return renderAuth(); }
+  const me = state.me, g = me.goals;
+  showTabs("profile");
+  app.innerHTML = `
+    ${topbar("Профиль", me.username, "")}
     <form class="card" id="goals">
       <b>Норма в день</b>
-      <div class="row"><div class="grow"><label>Ккал</label><input name="kcal" type="number" value="${g.kcal}"></div>
-      <div class="grow"><label>Белки, г</label><input name="protein" type="number" value="${g.protein}"></div></div>
-      <div class="row"><div class="grow"><label>Жиры, г</label><input name="fat" type="number" value="${g.fat}"></div>
-      <div class="grow"><label>Углеводы, г</label><input name="carbs" type="number" value="${g.carbs}"></div></div>
+      <div class="row"><div class="grow"><label>Ккал</label><input name="kcal" type="number" inputmode="numeric" value="${g.kcal}"></div>
+      <div class="grow"><label>Белки, г</label><input name="protein" type="number" inputmode="numeric" value="${g.protein}"></div></div>
+      <div class="row"><div class="grow"><label>Жиры, г</label><input name="fat" type="number" inputmode="numeric" value="${g.fat}"></div>
+      <div class="grow"><label>Углеводы, г</label><input name="carbs" type="number" inputmode="numeric" value="${g.carbs}"></div></div>
       <button class="primary block" style="margin-top:12px">Сохранить</button>
     </form>
     <div class="card" id="profile-card"><div class="spinner"></div></div>
-    <div class="card" id="health-card"></div>
     <div class="card" id="notify-card"></div>
+    <div class="card" id="health-card"></div>
     <div class="card small">
-      <div>Вы вошли как <b>${esc(me.username)}</b></div>
-      <div class="muted">Распознавания сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</div>
-      <button class="block" id="logout" style="margin-top:10px">Выйти</button>
+      <div class="muted">Распознавания и ИИ сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</div>
+      <button class="block" id="replay-onboarding" style="margin-top:10px">Пройти первые шаги заново</button>
+      <button class="block danger" id="logout" style="margin-top:8px">Выйти</button>
     </div>
-    ${me.is_admin ? '<div class="card" id="admin"><div class="spinner"></div></div>' : ""}`);
+    ${me.is_admin ? '<div class="card" id="admin"><div class="spinner"></div></div>' : ""}`;
   $("#goals").onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     try {
       state.me = await api("/api/me", { method: "PUT", json: { kcal: +f.kcal, protein: +f.protein, fat: +f.fat, carbs: +f.carbs, timezone: TZ } });
-      closeSheet(); toast("Сохранено"); state.view === "reports" ? loadStats() : loadDay();
+      toast("Норма сохранена");
     } catch (err) { toast(err.message); }
   };
-  $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.me = null; closeSheet(); renderAuth(); };
+  $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.me = null; renderAuth(); };
+  $("#replay-onboarding").onclick = () => renderOnboarding(1);
   if (me.is_admin) renderAdmin();
   loadProfile();
+}
+
+// ---------- coach ----------
+
+function loadCoach() {
+  state.view = "coach";
+  showTabs("coach");
+  app.innerHTML = `${topbar("Коуч", "чат о питании и привычках", "")}<div class="empty"><div class="empty-ico">💬</div><b>Скоро</b></div>`;
+}
+
+// ---------- first run: goal, Home Screen, reminders ----------
+
+async function renderOnboarding(step = 1) {
+  state.view = "onboarding";
+  state.onboardingStep = step;
+  if (step === 2 && (isStandalone() || !isIOS)) step = state.onboardingStep = 3; // already installed, or not an iPhone
+  if (step > 3) return finishOnboarding();
+  tabbar.hidden = true;
+  const dots = [1, 2, 3].map((n) => `<i class="${n === step ? "on" : n < step ? "done" : ""}"></i>`).join("");
+  const head = (title, text) => `<div class="onb-head"><div class="onb-dots">${dots}</div><h1>${title}</h1><p class="muted">${text}</p></div>`;
+  const foot = (next = "Дальше") => `<div class="onb-foot"><button class="primary block" id="onb-next">${next}</button>
+    <button class="block ghost-line" id="onb-skip">Пропустить настройку</button></div>`;
+  if (step === 1) {
+    app.innerHTML = `${head("Твоя норма", "Посчитаю калории и БЖУ под твой вес и цель. Потом их уточнит твой же дневник.")}
+      <div class="card" id="profile-card"><div class="spinner"></div></div>${foot()}`;
+    loadProfile();
+  } else if (step === 2) {
+    app.innerHTML = `${head("Поставь на экран «Домой»", "Так приложение открывается как обычное и может присылать напоминания.")}
+      <div class="card"><ol class="howto">
+        <li>Открой этот сайт в Safari.</li>
+        <li>Нажми «Поделиться» <span class="muted">(квадрат со стрелкой вверх)</span>.</li>
+        <li>Выбери «На экран «Домой»» → «Добавить».</li>
+        <li>Дальше открывай приложение с иконки 🥗.</li>
+      </ol></div>${foot("Сделал, дальше")}`;
+  } else {
+    let n = { evening: true, hour: 21, weekly: true, share_streak: false };
+    try { n = (await api("/api/profile")).notify; } catch { /* defaults */ }
+    app.innerHTML = `${head("Напоминания и серии", "Вечером напомню, если день пустой. А в общих сериях видно, кто сегодня уже записал — так держаться проще.")}
+      <div class="card" id="notify-card"></div>${foot("Готово")}`;
+    await renderNotify({ ...n, share_streak: true }, { autosave: false });
+  }
+  $("#onb-next").onclick = async () => {
+    if (step === 3) {
+      const f = $("#notify-form");
+      await api("/api/profile/notify", { method: "PUT", json: {
+        evening: f.evening.checked, hour: +f.hour.value, weekly: f.weekly.checked, share_streak: f.share_streak.checked } }).catch(() => {});
+    }
+    renderOnboarding(step + 1);
+  };
+  $("#onb-skip").onclick = finishOnboarding;
+}
+
+async function finishOnboarding() {
+  try { state.me = await api("/api/profile/onboarded", { method: "POST" }); } catch { /* not critical */ }
+  state.day = isoDate(new Date());
+  loadDay();
 }
 
 // ---------- profile: goal calculator & Apple Health ----------
@@ -1030,8 +1102,8 @@ const goalsLine = (s) => `<b>${s.kcal} ккал</b> · Б ${s.protein} · Ж ${s
 async function applyGoals(s) {
   try {
     state.me = await api("/api/me", { method: "PUT", json: { kcal: s.kcal, protein: s.protein, fat: s.fat, carbs: s.carbs, timezone: TZ } });
-    closeSheet(); toast("Норма обновлена");
-    state.view === "reports" ? loadStats() : loadDay();
+    toast("Норма обновлена");
+    refreshView();
   } catch (err) { toast(err.message); }
 }
 
@@ -1148,7 +1220,7 @@ async function enablePush() {
   await api("/api/push/subscribe", { method: "POST", json: sub.toJSON() });
 }
 
-async function renderNotify(n) {
+async function renderNotify(n, { autosave = true } = {}) {
   const box = $("#notify-card");
   if (!box) return;
   let device;
@@ -1173,6 +1245,7 @@ async function renderNotify(n) {
       <label class="check"><input type="checkbox" name="share_streak" ${n.share_streak ? "checked" : ""}> Участвовать в общих сериях <span class="muted small">— твою серию увидят те, кто тоже участвует</span></label>
     </form>`;
   $("#notify-form").onchange = async (e) => {
+    if (!autosave) return;
     const f = e.currentTarget;
     try {
       const p = await api("/api/profile/notify", { method: "PUT", json: {
@@ -1185,7 +1258,7 @@ async function renderNotify(n) {
   $("#push-on")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try { await enablePush(); toast("Уведомления включены"); } catch (err) { toast(err.message); }
-    renderNotify(n);
+    renderNotify(n, { autosave });
   });
   $("#push-test")?.addEventListener("click", async () => {
     try { await api("/api/push/test", { method: "POST" }); toast("Отправил — проверь уведомления"); } catch (err) { toast(err.message); }
@@ -1193,7 +1266,7 @@ async function renderNotify(n) {
   $("#push-off")?.addEventListener("click", async () => {
     const sub = await deviceSubscription();
     if (sub) { await api("/api/push/unsubscribe", { method: "POST", json: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
-    renderNotify(n);
+    renderNotify(n, { autosave });
   });
 }
 
@@ -1234,6 +1307,7 @@ async function start() {
     if (state.me.timezone !== TZ) api("/api/me", { method: "PUT", json: { ...state.me.goals, timezone: TZ } }).then((m) => (state.me = m)).catch(() => {});
     // A tap on the weekly review notification opens /#reports.
     if (location.hash === "#reports") { history.replaceState(null, "", "/"); await loadStats(); }
+    else if (!state.me.onboarded) renderOnboarding(1);
     else await loadDay();
   } catch (err) {
     if (err.status === 401) renderAuth();
@@ -1249,7 +1323,10 @@ document.addEventListener("visibilitychange", () => {
   if (state.day === todayAtStart) state.day = today;
   if (todayAtStart !== today) state.review = null;
   todayAtStart = today;
-  if (state.view === "reports") loadStats(); else loadDay();
+  // Only the live screens refresh, and they stay where they were scrolled.
+  if (state.view !== "day" && state.view !== "reports") return;
+  const y = window.scrollY;
+  (state.view === "reports" ? loadStats() : loadDay()).then(() => window.scrollTo(0, y));
 });
 
 start();

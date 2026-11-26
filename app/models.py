@@ -123,6 +123,7 @@ class Profile(Base):
     remind_hour: Mapped[int] = mapped_column(Integer, default=21)  # local hour
     weekly_review_push: Mapped[bool] = mapped_column(Boolean, default=True)
     share_streak: Mapped[bool] = mapped_column(Boolean, default=False)  # shown to the others who share theirs
+    onboarded: Mapped[bool] = mapped_column(Boolean, default=False)  # went through (or skipped) the first-run steps
     last_evening_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
     last_weekly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
 

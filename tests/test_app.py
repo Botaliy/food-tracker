@@ -650,3 +650,9 @@ def _jpeg() -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (2400, 1800), "orange").save(buf, format="JPEG")
     return buf.getvalue()
+
+
+def test_onboarding_flag(client):
+    assert client.get("/api/me").json()["onboarded"] is False
+    assert client.post("/api/profile/onboarded").json()["onboarded"] is True
+    assert client.get("/api/me").json()["onboarded"] is True

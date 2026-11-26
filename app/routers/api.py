@@ -60,6 +60,7 @@ def _me(db: Session, user: User) -> dict:
         },
         "spent_today": round(usage.spent_today(db, user), 4),
         "daily_limit": usage.daily_limit(user),
+        "onboarded": bool((p := db.get(Profile, user.id)) and p.onboarded),
     }
 
 
@@ -626,6 +627,13 @@ def _upsert_weight(db: Session, user: User, d: date, kg: float) -> None:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+@router.post("/profile/onboarded")
+def mark_onboarded(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    _profile(db, user).onboarded = True
+    db.commit()
+    return _me(db, user)
 
 
 @router.post("/profile/health-token")
