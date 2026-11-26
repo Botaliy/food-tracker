@@ -527,7 +527,8 @@ async function loadRecent() {
 
 // A copy of an existing meal as a new, unsaved one eaten now.
 function repeatMeal(m) {
-  openEditor({ title: m.title, items: m.items.map(({ id, ...i }) => ({ ...i, options: [] })), comment: "", today: true });
+  // A repeat is the user's own choice, not a recognition: nothing to learn from it.
+  openEditor({ title: m.title, items: m.items.map(({ id, ai_grams, ...i }) => ({ ...i, options: [] })), comment: "", today: true });
 }
 
 sheetBody.addEventListener("change", async (e) => {
@@ -620,6 +621,7 @@ function renderEditor() {
     <div class="row between"><h2>${draft.id ? "Редактирование" : "Проверь и поправь"}</h2><button class="ghost" data-close>✕</button></div>
     <input id="title" value="${esc(draft.title)}" placeholder="Название, например «Обед»">
     ${draft.comment ? `<p class="small muted">💡 ${esc(draft.comment)}</p>` : ""}
+    ${draft.personal_hints ? '<p class="small muted">🎯 Учтены твои прошлые правки порций</p>' : ""}
     <div class="card" style="margin-top:10px" id="items">${draft.items.map(itemHtml).join("") || '<p class="muted small">Добавь продукты через поиск ниже</p>'}</div>
     <div class="card">
       <input id="food-q" placeholder="Добавить продукт: поиск (рус./англ.)" autocomplete="off">
@@ -716,6 +718,7 @@ async function saveDraft(btn) {
     items: items.map((i) => ({
       name: i.name, grams: Number(i.grams), food_id: i.food_id ?? null, source: i.source,
       kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100,
+      ai_grams: i.ai_grams ?? null,
     })),
   };
   // A new meal lands on the day being viewed: "now" for today, midday for a past day.

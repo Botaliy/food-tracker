@@ -40,7 +40,7 @@ class FakeClient:
 def fake_model(monkeypatch):
     holder = {"client": FakeClient(fake_response(json.dumps(RECOGNITION)))}
     real = recognize_mod.recognize
-    monkeypatch.setattr("app.routers.api.recognize", lambda img, note: real(img, note, client=holder["client"]))
+    monkeypatch.setattr("app.routers.api.recognize", lambda img, note, hints=(): real(img, note, hints, client=holder["client"]))
     return holder
 
 
@@ -377,6 +377,45 @@ def test_stats_adaptive_needs_data_then_suggests(client):
     ad = client.get("/api/stats").json()["energy"]["adaptive"]
     assert ad["ready"] and ad["avg_intake"] == 2000
     assert ad["tdee"] == 2550 and ad["suggested"]["kcal"] == 2550  # no profile: keep weight
+
+
+# ---------- learning from corrections ----------
+
+def _ai_meal(client, *items):
+    """A saved recognized meal: (name, grams kept, grams the model suggested or None if added by hand)."""
+    r = client.post("/api/meals", json={"items": [
+        {"name": n, "grams": g, "ai_grams": ai, "kcal_100": 100, "protein_100": 0, "fat_100": 0, "carbs_100": 0}
+        for n, g, ai in items]})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_corrections_become_hints(client, db):
+    from app import corrections
+    from app.models import User
+    user = db.query(User).filter_by(username="admin").one()
+    for _ in range(3):
+        _ai_meal(client, ("Рис варёный", 200, 150), ("Курица", 120, 120), ("Масло оливковое", 10, None))
+    _ai_meal(client, ("Рис варёный", 160, 160))
+    # Not recognized at all: an added item here is no correction.
+    client.post("/api/meals", json={"items": [{"name": "Сыр", "grams": 30, "kcal_100": 350, "protein_100": 25, "fat_100": 27, "carbs_100": 0}]})
+
+    h = corrections.hints(db, user)
+    assert len(h) == 2
+    assert "Рис варёный" in h[0] and "×1.33" in h[0] and "4 раз" in h[0]
+    assert "Масло оливковое" in h[1] and "~10 г" in h[1]
+    assert client.get("/api/day").json()["meals"][0]["items"][0]["ai_grams"] == 150
+
+
+def test_recognize_sends_hints_and_marks_ai_grams(client, db, fake_model):
+    for _ in range(3):
+        _ai_meal(client, ("Рис", 220, 150))
+    r = client.post("/api/recognize", data={"note": "обед"})
+    draft = r.json()
+    assert draft["personal_hints"] == 1
+    assert all(i["ai_grams"] == i["grams"] for i in draft["items"])
+    text = fake_model["client"].kwargs["messages"][0]["content"][-1]["text"]
+    assert "Прошлые правки" in text and "«Рис»" in text
 
 
 # ---------- reminders & shared streaks ----------

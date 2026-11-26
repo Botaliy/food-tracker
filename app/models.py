@@ -86,6 +86,8 @@ class MealItem(Base):
     protein_100: Mapped[float] = mapped_column(Float)
     fat_100: Mapped[float] = mapped_column(Float)
     carbs_100: Mapped[float] = mapped_column(Float)
+    # The model's own weight for a recognized item, to learn from the user's corrections.
+    ai_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     meal: Mapped[Meal] = relationship(back_populates="items")
 

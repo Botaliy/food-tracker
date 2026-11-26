@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, diary, energy, foods, push, review as review_mod, usage
+from app import auth, corrections, diary, energy, foods, push, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
@@ -150,8 +150,9 @@ def recognize_meal(
             raise HTTPException(status_code=400, detail="Не получилось открыть фото")
 
     model = get_settings().recognize_model
+    hints = corrections.hints(db, user)
     try:
-        result = recognize(image, note[:500])
+        result = recognize(image, note[:500], hints)
     except RecognizeErrorWithResponse as exc:
         usage.record_call(db, user, exc.response, model=model, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -160,6 +161,7 @@ def recognize_meal(
 
     cost = usage.record_call(db, user, result.response, model=model)
     draft = build_draft(db, result.recognition, user.id)
+    draft["personal_hints"] = len(hints)
     draft["cost_usd"] = round(cost, 4)
     draft["spent_today"] = round(usage.spent_today(db, user), 4)
     return draft
@@ -202,6 +204,7 @@ class ItemIn(BaseModel):
     protein_100: float = Field(ge=0, le=100)
     fat_100: float = Field(ge=0, le=100)
     carbs_100: float = Field(ge=0, le=100)
+    ai_grams: float | None = Field(None, gt=0, le=5000)
 
 
 class MealIn(BaseModel):
@@ -222,6 +225,7 @@ def _item(db: Session, body: ItemIn, user: User) -> MealItem:
     item = MealItem(
         name=body.name.strip(), grams=body.grams, source=body.source if body.source in {"estimate", "manual"} else "estimate",
         kcal_100=body.kcal_100, protein_100=body.protein_100, fat_100=body.fat_100, carbs_100=body.carbs_100,
+        ai_grams=body.ai_grams,
     )
     # A database food's numbers are taken from the database, not from the client.
     food = db.get(Food, body.food_id) if body.food_id is not None else None
@@ -252,6 +256,7 @@ def _meal_dict(meal: Meal, tz: str) -> dict:
             {
                 "id": i.id, "name": i.name, "grams": i.grams, "food_id": i.food_id, "source": i.source,
                 "kcal_100": i.kcal_100, "protein_100": i.protein_100, "fat_100": i.fat_100, "carbs_100": i.carbs_100,
+                "ai_grams": i.ai_grams,
             }
             for i in meal.items
         ],

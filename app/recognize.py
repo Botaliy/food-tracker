@@ -109,8 +109,10 @@ def _client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=key, max_retries=2, timeout=90)
 
 
-def recognize(image_jpeg: bytes | None, note: str, client: anthropic.Anthropic | None = None) -> RecognizeResult:
-    """Call the model. The raw response is returned too, for usage accounting."""
+def recognize(image_jpeg: bytes | None, note: str, hints: list[str] | tuple = (),
+              client: anthropic.Anthropic | None = None) -> RecognizeResult:
+    """Call the model. `hints` are the user's usual corrections (app.corrections).
+    The raw response is returned too, for usage accounting."""
     if image_jpeg is None and not note.strip():
         raise RecognizeError("Нужно фото или описание еды")
 
@@ -121,7 +123,11 @@ def recognize(image_jpeg: bytes | None, note: str, client: anthropic.Anthropic |
             "type": "image",
             "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.b64encode(image_jpeg).decode()},
         })
-    content.append({"type": "text", "text": f"Заметка пользователя: {note.strip()}" if note.strip() else "Что на фото?"})
+    text = f"Заметка пользователя: {note.strip()}" if note.strip() else "Что на фото?"
+    if hints:
+        text += ("\n\nПрошлые правки этого пользователя (учитывай, если подходит к этой тарелке; фото и заметка важнее):\n"
+                 + "\n".join(f"- {h}" for h in hints))
+    content.append({"type": "text", "text": text})
 
     kwargs: dict = {
         "model": settings.recognize_model,

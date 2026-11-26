@@ -36,6 +36,7 @@ def draft_item(db: Session, item: RecognizedItem, user_id: int) -> dict:
         # What's on the plate, in the user's words, even when the database row is named in English.
         "name": item.name_ru,
         "grams": round(item.grams),
+        "ai_grams": round(item.grams),
         "confidence": item.confidence,
         "options": options,
     }
