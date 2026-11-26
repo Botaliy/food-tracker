@@ -28,10 +28,28 @@ TICK_SECONDS = 300
 WEEKLY_HOUR = 10  # Monday, local time
 
 
-def evening_text(streak: int) -> tuple[str, str]:
+def evening_text(streak: int, freeze_ready: bool, partners: list[str]) -> tuple[str, str]:
+    """`partners`: people in shared streaks who have already logged today."""
+    others = ""
+    if partners:
+        names = ", ".join(partners[:3])
+        others = f" {names} уже {'записал' if len(partners) == 1 else 'записали'} свой день."
+    if streak >= 2 and freeze_ready:
+        return f"🔥 Серия {streak} дн.", f"Сегодня пусто. Пропуск закроет заморозка, но она одна на неделю.{others}"
     if streak >= 2:
-        return f"🔥 Серия {streak} дн. под угрозой", "Сегодня ещё ничего не записано — серия сгорит в полночь."
-    return "🍽️ Что ел сегодня?", "Сегодня ещё ничего не записано. Пара фото — и день посчитан."
+        return f"🔥 Серия {streak} дн. под угрозой", f"Сегодня ещё ничего не записано — серия сгорит в полночь.{others}"
+    return "🍽️ Что ел сегодня?", f"Сегодня ещё ничего не записано. Пара фото — и день посчитан.{others}"
+
+
+def partners_logged(db: Session, user: User, profile: Profile) -> list[str]:
+    if not profile.share_streak:
+        return []
+    names = []
+    for other in db.scalars(select(User).join(Profile, Profile.user_id == User.id)
+                            .where(Profile.share_streak.is_(True), User.id != user.id)):
+        if diary.today(other) in diary.logged_days(db, other, diary.today(other)):
+            names.append(other.username)
+    return names
 
 
 def run_due(db: Session, now: datetime, send: Callable = push.send) -> list[tuple[int, str]]:
@@ -52,9 +70,9 @@ def run_due(db: Session, now: datetime, send: Callable = push.send) -> list[tupl
         if profile.remind_evening and local.hour >= profile.remind_hour and profile.last_evening_push != today:
             profile.last_evening_push = today
             db.commit()
-            streak, logged_today = diary.streak(db, user, today)
-            if not logged_today:
-                title, body = evening_text(streak)
+            info = diary.streaks(db, user, today)
+            if not info["today"]:
+                title, body = evening_text(info["days"], info["freeze_ready"], partners_logged(db, user, profile))
                 if send(db, user, title, body):
                     done.append((user.id, "evening"))
 

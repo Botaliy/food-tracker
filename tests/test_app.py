@@ -176,8 +176,8 @@ def test_stats_group_days_in_user_timezone(client):
     assert by_date[today.isoformat()]["kcal"] == 0
     assert s["logged_days"] == 2
     assert s["avg"]["kcal"] == pytest.approx((2200 + 1500) / 2)
-    assert s["in_goal_days"] == 1  # 2200 is over the 2000 goal, 1500 is within
-    assert s["streak"] == 1  # today is empty, so the run ends yesterday
+    assert s["in_goal_days"] == 0  # 2200 is over the 2000 goal, 1500 is under the 85% floor
+    assert s["streak"] == 2  # today is still empty; the gap 2 days ago is bridged by the weekly freeze
 
 
 def test_streak_counts_today_once_logged(client):
@@ -656,3 +656,44 @@ def test_onboarding_flag(client):
     assert client.get("/api/me").json()["onboarded"] is False
     assert client.post("/api/profile/onboarded").json()["onboarded"] is True
     assert client.get("/api/me").json()["onboarded"] is True
+
+
+def test_streak_runs_freeze_and_quality():
+    from datetime import date, timedelta
+    from app import diary
+    on = date(2026, 11, 26)
+    d = lambda k: on - timedelta(days=k)  # noqa: E731
+
+    # One gap is frozen; a second gap within the week ends the run.
+    logged = {d(k) for k in (0, 1, 2, 4, 5, 6, 8, 9)}
+    n, frozen = diary.run(lambda x: x in logged, on, diary.FREEZE_EVERY_DAYS)
+    assert (n, frozen) == (6, [d(3)])
+    # Two empty days in a row: no freeze.
+    logged = {d(k) for k in (0, 3, 4)}
+    assert diary.run(lambda x: x in logged, on, diary.FREEZE_EVERY_DAYS) == (1, [])
+    # Today still empty: the run counts up to yesterday, and an empty yesterday can be frozen.
+    logged = {d(k) for k in (2, 3)}
+    assert diary.run(lambda x: x in logged, on, diary.FREEZE_EVERY_DAYS) == (2, [d(1)])
+    # Freezes a week apart are both allowed.
+    logged = {d(k) for k in range(20)} - {d(2), d(9)}
+    assert diary.run(lambda x: x in logged, on, diary.FREEZE_EVERY_DAYS)[1] == [d(2), d(9)]
+
+    assert diary.in_goal(1800, 2000) and not diary.in_goal(1500, 2000) and not diary.in_goal(2200, 2000)
+
+
+def test_day_shows_streaks(client):
+    from datetime import timedelta
+    today = _local_today()
+    for k in (1, 2, 4):
+        _eat(client, f"{today - timedelta(days=k)}T12:00:00", 475, grams=400)  # 1900 kcal, 40 g protein
+    st = client.get("/api/day").json()["streaks"]
+    assert st["days"] == 3 and st["today"] is False and st["frozen"] == (today - timedelta(days=3)).isoformat()
+    assert st["freeze_ready"] is False and st["next_milestone"] == 7
+    assert st["in_goal"] == 2 and st["protein"] == 0  # 40 g of 120 isn't enough
+
+
+def test_evening_text_names_partners():
+    from app import reminders
+    title, body = reminders.evening_text(12, False, ["alina"])
+    assert "под угрозой" in title and "alina уже записал" in body
+    assert "заморозка" in reminders.evening_text(12, True, [])[1]

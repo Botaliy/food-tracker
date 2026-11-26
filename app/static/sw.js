@@ -1,7 +1,7 @@
 // Network first for everything: the app is useless offline anyway (recognition
 // and the diary live on the server), but the shell should still open on a bad
 // connection, so the last good copy of the static files is kept.
-const CACHE = "food-shell-v11";
+const CACHE = "food-shell-v12";
 const SHELL = ["/", "/static/app.js", "/static/style.css", "/manifest.webmanifest", "/static/icons/icon.svg"];
 
 self.addEventListener("install", (e) => {

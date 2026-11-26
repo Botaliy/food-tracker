@@ -379,6 +379,7 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "totals": totals,
         "goals": _me(db, user)["goals"],
         "activity": _activity_dict(act),
+        "streaks": diary.streaks(db, user, _today(user)),
     }
 
 
@@ -388,7 +389,6 @@ def _activity_dict(a: Activity | None) -> dict | None:
 
 # ---------- reports ----------
 
-IN_GOAL_RATIO = 1.05  # same 5% slack as the red "over" bar on the day screen
 _today = diary.today
 _local_day = diary.local_day
 
@@ -482,7 +482,7 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
         "days": rows,
         "avg": avg,
         "logged_days": len(logged),
-        "in_goal_days": sum(1 for r in logged if r["kcal"] <= user.kcal_goal * IN_GOAL_RATIO),
+        "in_goal_days": sum(1 for r in logged if diary.in_goal(r["kcal"], user.kcal_goal)),
         "streak": diary.streak(db, user, today)[0],
         "weights": [{"date": w.day.isoformat(), "kg": w.kg} for w in weights],
         "last_weight": {"date": last_weight.day.isoformat(), "kg": last_weight.kg} if last_weight else None,

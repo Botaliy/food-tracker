@@ -163,6 +163,7 @@ async function loadDay() {
     state.dayData = dayData;
     state.streaks = streaks;
     renderDay();
+    celebrate(dayData.streaks);
   } catch (err) {
     if (err.status === 401) return renderAuth();
     app.innerHTML = `<div class="card error">${esc(err.message)}</div>`;
@@ -265,7 +266,8 @@ function renderDay() {
             <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
     </div>
-    ${streaksRow(state.streaks)}
+    ${isToday ? myStreaks(state.dayData.streaks) : ""}
+    ${isToday ? streaksRow(state.streaks) : ""}
     ${meals.length
       ? `<h3 class="sub">Приёмы пищи</h3>${meals.map(mealCard).join("")}`
       : `<div class="empty"><div class="empty-ico">📸</div><b>Пока пусто</b>
@@ -273,6 +275,31 @@ function renderDay() {
 }
 
 const fmtInt = (n) => r0(n).toLocaleString("ru-RU");
+
+const MILESTONES = [7, 14, 30, 50, 100, 200, 365];
+
+function myStreaks(st) {
+  if (!st) return "";
+  const chips = [];
+  if (st.days) chips.push(`<span class="chip ${st.today ? "me" : ""}" title="Дней подряд с записями">🔥 ${st.days} ${plural(st.days, "день", "дня", "дней")}</span>`);
+  if (st.frozen) chips.push('<span class="chip" title="Один пропуск в неделю не обрывает серию">❄️ заморозка спасла день</span>');
+  if (st.in_goal) chips.push(`<span class="chip" title="Дней подряд в коридоре 85–105% нормы">🎯 ${st.in_goal} в норме</span>`);
+  if (st.protein) chips.push(`<span class="chip" title="Дней подряд с белком от 90% нормы">💪 ${st.protein} с белком</span>`);
+  if (!chips.length) return "";
+  const next = st.next_milestone && st.days ? `<span class="muted small">до ${st.next_milestone}: ${st.next_milestone - st.days}</span>` : "";
+  return `<div class="streaks">${chips.join("")}${next}</div>`;
+}
+
+// A milestone reached today gets a moment, once.
+function celebrate(st) {
+  if (!st?.today || !MILESTONES.includes(st.days) || state.day !== isoDate(new Date())) return;
+  const key = `ft-milestone:${state.me?.username}`;
+  try {
+    if (localStorage.getItem(key) === String(st.days)) return;
+    localStorage.setItem(key, String(st.days));
+  } catch { return; }
+  setTimeout(() => toast(`🎉 ${st.days} ${plural(st.days, "день", "дня", "дней")} подряд! Так держать`), 400);
+}
 
 function streaksRow(st) {
   if (!st?.joined || !st.people.length) return "";
