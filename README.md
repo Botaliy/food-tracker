@@ -52,3 +52,14 @@ TLS для всех приложений на сервере терминиру�
    docker compose -f /root/food-tracker/docker-compose.yml exec food-tracker python -m scripts.import_usda data/sr_legacy.zip
    docker compose -f /root/food-tracker/docker-compose.yml exec food-tracker python -m scripts.create_user <логин> --admin
    ```
+
+## Бэкапы
+
+`scripts/backup.sh` каждую ночь снимает копию базы в `data/backups` (хранятся 3 последние), а по воскресеньям отправляет её в Telegram ботом tg-assistant. Получатель — `BACKUP_TG_CHAT_ID` в `.env`, токен бота берётся из `/root/tg-assistant/.env`.
+
+```bash
+crontab -e   # 15 3 * * * /root/food-tracker/scripts/backup.sh >> /var/log/food-backup.log 2>&1
+./scripts/backup.sh --send   # проверить отправку прямо сейчас
+```
+
+Восстановление: остановить контейнер, `gunzip` копию в `data/food.db`, удалить `food.db-wal` и `food.db-shm`, запустить.
