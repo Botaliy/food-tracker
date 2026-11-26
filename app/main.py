@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -7,6 +8,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
 from app.config import BASE_DIR, get_settings
+from app import push, reminders
 from app.database import init_db
 from app.routers import admin, api
 
@@ -18,7 +20,10 @@ STATIC_DIR = BASE_DIR / "app" / "static"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    task = asyncio.create_task(reminders.loop()) if settings.scheduler_enabled and push.enabled() else None
     yield
+    if task:
+        task.cancel()
 
 
 app = FastAPI(title="Food Tracker", lifespan=lifespan, docs_url=None, redoc_url=None)

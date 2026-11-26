@@ -12,8 +12,12 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session, selectinload
 
+from app import diary, usage
 from app.config import get_settings
+from app.models import Activity, Meal, Review, User, Weight
 from app.recognize import RecognizeError as ReviewError
 from app.recognize import RecognizeErrorWithResponse as ReviewErrorWithResponse
 from app.recognize import _client
@@ -153,3 +157,52 @@ def review(digest: dict, client: anthropic.Anthropic | None = None) -> ReviewRes
         logger.error("Unparseable review: %r", text[:500])
         raise ReviewErrorWithResponse("Не удалось разобрать ответ модели", response) from exc
     return ReviewResult(review=out, response=response)
+
+
+class NotEnoughData(ReviewError):
+    pass
+
+
+class LimitReached(ReviewError):
+    pass
+
+
+def create_for(db: Session, user: User) -> Review:
+    """Today's review for the user: the stored one if it's already made, else a new one.
+    Raises NotEnoughData, LimitReached or ReviewError; a billed failure is recorded."""
+    today = diary.today(user)
+    done = db.scalar(select(Review).where(Review.user_id == user.id, Review.day == today))
+    if done is not None:
+        return done
+
+    first = today - timedelta(days=REVIEW_DAYS - 1)
+    start, _ = usage.day_bounds_utc(user.timezone, first)
+    _, end = usage.day_bounds_utc(user.timezone, today)
+    meals = db.scalars(
+        select(Meal).where(Meal.user_id == user.id, Meal.eaten_at >= start, Meal.eaten_at < end)
+        .options(selectinload(Meal.items))
+    ).all()
+    weights = db.scalars(
+        select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= today).order_by(Weight.day)
+    ).all()
+    activity = db.scalars(
+        select(Activity).where(Activity.user_id == user.id, Activity.day >= first, Activity.day <= today)
+    ).all()
+    goals = {"kcal": user.kcal_goal, "protein": user.protein_goal, "fat": user.fat_goal, "carbs": user.carbs_goal}
+    digest = build_digest(meals, weights, goals, user.timezone, today, activity)
+    if logged_days(digest) < MIN_LOGGED_DAYS:
+        raise NotEnoughData(f"Для обзора нужны записи хотя бы за {MIN_LOGGED_DAYS} дня из последних 7")
+    if problem := usage.limit_problem(db, user):
+        raise LimitReached(problem)
+
+    model = get_settings().review_model
+    try:
+        result = review(digest)
+    except ReviewErrorWithResponse as exc:
+        usage.record_call(db, user, exc.response, model=model, error=str(exc))
+        raise
+    usage.record_call(db, user, result.response, model=model)
+    saved = Review(user_id=user.id, day=today, content=result.review.model_dump_json())
+    db.add(saved)
+    db.commit()
+    return saved

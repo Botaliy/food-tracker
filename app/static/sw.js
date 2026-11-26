@@ -1,7 +1,7 @@
 // Network first for everything: the app is useless offline anyway (recognition
 // and the diary live on the server), but the shell should still open on a bad
 // connection, so the last good copy of the static files is kept.
-const CACHE = "food-shell-v6";
+const CACHE = "food-shell-v7";
 const SHELL = ["/", "/static/app.js", "/static/style.css", "/manifest.webmanifest", "/static/icons/icon.svg"];
 
 self.addEventListener("install", (e) => {
@@ -25,5 +25,29 @@ self.addEventListener("fetch", (e) => {
         return res;
       })
       .catch(() => caches.match(e.request))
+  );
+});
+
+// Reminders: { title, body, url } from app/push.py.
+self.addEventListener("push", (e) => {
+  let data = {};
+  try { data = e.data ? e.data.json() : {}; } catch { data = { body: e.data?.text() }; }
+  e.waitUntil(self.registration.showNotification(data.title || "КБЖУ по фото", {
+    body: data.body || "",
+    icon: "/static/icons/icon-192.png",
+    badge: "/static/icons/icon-192.png",
+    data: { url: data.url || "/" },
+  }));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = new URL(e.notification.data?.url || "/", self.location.origin).href;
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
+      const win = wins.find((w) => new URL(w.url).origin === self.location.origin);
+      if (win) return win.navigate(url).then((w) => (w || win).focus());
+      return self.clients.openWindow(url);
+    })
   );
 });

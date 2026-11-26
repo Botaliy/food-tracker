@@ -7,6 +7,7 @@ _tmp = tempfile.mkdtemp()
 os.environ["DB_PATH"] = os.path.join(_tmp, "test.db")
 os.environ["ANTHROPIC_API_KEY"] = "test"
 os.environ["DEFAULT_DAILY_LIMIT_USD"] = "0.05"
+os.environ["SCHEDULER_ENABLED"] = "false"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -15,14 +16,14 @@ from sqlalchemy import delete  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.database import SessionLocal, init_db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Activity, ApiCall, Food, Invite, Meal, Profile, Review, User, Weight  # noqa: E402
+from app.models import Activity, ApiCall, Food, Invite, Meal, Profile, PushSubscription, Review, User, Weight  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def clean_db():
     init_db()
     with SessionLocal() as db:
-        for model in (ApiCall, Review, Activity, Profile, Weight, Meal, Invite, Food, User):
+        for model in (ApiCall, Review, Activity, PushSubscription, Profile, Weight, Meal, Invite, Food, User):
             db.execute(delete(model))
         db.commit()
     yield

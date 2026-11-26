@@ -115,6 +115,26 @@ class Profile(Base):
     rate_kg_week: Mapped[float] = mapped_column(Float, default=0.0)  # negative = losing
     # sha256 of the Shortcut's token: the token itself is shown once and never stored.
     health_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    # Reminders (sent only to devices that subscribed to push).
+    remind_evening: Mapped[bool] = mapped_column(Boolean, default=True)
+    remind_hour: Mapped[int] = mapped_column(Integer, default=21)  # local hour
+    weekly_review_push: Mapped[bool] = mapped_column(Boolean, default=True)
+    share_streak: Mapped[bool] = mapped_column(Boolean, default=False)  # shown to the others who share theirs
+    last_evening_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+    last_weekly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+
+
+class PushSubscription(Base):
+    """A browser's Web Push endpoint: one per installed app per device."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    endpoint: Mapped[str] = mapped_column(String(1000), unique=True)
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
 class Activity(Base):

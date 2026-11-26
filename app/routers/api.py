@@ -6,15 +6,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, energy, foods, review as review_mod, usage
+from app import auth, diary, energy, foods, push, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
 from app.images import release_memory, shrink
-from app.models import Activity, Food, Invite, Meal, MealItem, Profile, Review, User, Weight, utcnow
+from app.models import Activity, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
 router = APIRouter(prefix="/api")
@@ -345,31 +345,9 @@ def _activity_dict(a: Activity | None) -> dict | None:
 
 # ---------- reports ----------
 
-STREAK_LOOKBACK_DAYS = 400
 IN_GOAL_RATIO = 1.05  # same 5% slack as the red "over" bar on the day screen
-
-
-def _today(user: User) -> date:
-    return datetime.now(ZoneInfo(user.timezone)).date()
-
-
-def _local_day(dt: datetime, tz: str) -> date:
-    return dt.replace(tzinfo=UTC).astimezone(ZoneInfo(tz)).date()
-
-
-def _streak(db: Session, user: User, today: date) -> int:
-    """Days in a row with at least one meal, ending today, or yesterday if today is still empty."""
-    since, _ = usage.day_bounds_utc(user.timezone, today - timedelta(days=STREAK_LOOKBACK_DAYS))
-    logged = {
-        _local_day(dt, user.timezone)
-        for dt in db.scalars(select(Meal.eaten_at).where(Meal.user_id == user.id, Meal.eaten_at >= since))
-    }
-    day = today if today in logged else today - timedelta(days=1)
-    n = 0
-    while day in logged:
-        n += 1
-        day -= timedelta(days=1)
-    return n
+_today = diary.today
+_local_day = diary.local_day
 
 
 def _daily_rows(db: Session, user: User, first: date, last: date) -> list[dict]:
@@ -462,7 +440,7 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
         "avg": avg,
         "logged_days": len(logged),
         "in_goal_days": sum(1 for r in logged if r["kcal"] <= user.kcal_goal * IN_GOAL_RATIO),
-        "streak": _streak(db, user, today),
+        "streak": diary.streak(db, user, today)[0],
         "weights": [{"date": w.day.isoformat(), "kg": w.kg} for w in weights],
         "last_weight": {"date": last_weight.day.isoformat(), "kg": last_weight.kg} if last_weight else None,
         "energy": _energy(db, user, today, rows),
@@ -519,44 +497,14 @@ def get_review(user: User = Depends(auth.current_user), db: Session = Depends(ge
 
 @router.post("/review")
 def make_review(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
-    today = _today(user)
-    # One review per day: pressing the button again shows the same one for free.
-    done = db.scalar(select(Review).where(Review.user_id == user.id, Review.day == today))
-    if done is not None:
-        return {"review": _review_dict(done), "fresh": True}
-
-    first = today - timedelta(days=review_mod.REVIEW_DAYS - 1)
-    start, _ = usage.day_bounds_utc(user.timezone, first)
-    _, end = usage.day_bounds_utc(user.timezone, today)
-    meals = db.scalars(
-        select(Meal).where(Meal.user_id == user.id, Meal.eaten_at >= start, Meal.eaten_at < end)
-        .options(selectinload(Meal.items))
-    ).all()
-    weights = db.scalars(
-        select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= today).order_by(Weight.day)
-    ).all()
-    activity = db.scalars(
-        select(Activity).where(Activity.user_id == user.id, Activity.day >= first, Activity.day <= today)
-    ).all()
-    digest = review_mod.build_digest(meals, weights, _me(db, user)["goals"], user.timezone, today, activity)
-    if review_mod.logged_days(digest) < review_mod.MIN_LOGGED_DAYS:
-        raise HTTPException(status_code=400, detail=f"Для обзора нужны записи хотя бы за {review_mod.MIN_LOGGED_DAYS} дня из последних 7")
-    if problem := usage.limit_problem(db, user):
-        raise HTTPException(status_code=429, detail=problem)
-
-    model = get_settings().review_model
     try:
-        result = review_mod.review(digest)
-    except review_mod.ReviewErrorWithResponse as exc:
-        usage.record_call(db, user, exc.response, model=model, error=str(exc))
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        saved = review_mod.create_for(db, user)
+    except review_mod.NotEnoughData as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except review_mod.LimitReached as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except review_mod.ReviewError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    usage.record_call(db, user, result.response, model=model)
-    saved = Review(user_id=user.id, day=today, content=result.review.model_dump_json())
-    db.add(saved)
-    db.commit()
     return {"review": _review_dict(saved), "fresh": True}
 
 
@@ -587,6 +535,11 @@ def _profile_dict(db: Session, user: User, profile: Profile) -> dict:
         "formula": _formula(profile, last_weight, today),
         "health": {"connected": profile.health_token_hash is not None,
                    "last_day": last_activity.isoformat() if last_activity else None},
+        "notify": {
+            "evening": profile.remind_evening, "hour": profile.remind_hour,
+            "weekly": profile.weekly_review_push, "share_streak": profile.share_streak,
+            "devices": db.scalar(select(func.count()).select_from(PushSubscription).where(PushSubscription.user_id == user.id)),
+        },
     }
 
 
@@ -682,3 +635,87 @@ def receive_health(body: HealthIn, authorization: str = Header(""), db: Session 
         _upsert_weight(db, user, d, round(body.weight_kg, 1))
     db.commit()
     return {"ok": True, "date": d.isoformat()}
+
+
+# ---------- push reminders ----------
+
+class NotifyIn(BaseModel):
+    evening: bool
+    hour: int = Field(ge=17, le=23)
+    weekly: bool
+    share_streak: bool
+
+
+@router.put("/profile/notify")
+def put_notify(body: NotifyIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    profile = _profile(db, user)
+    profile.remind_evening, profile.remind_hour = body.evening, body.hour
+    profile.weekly_review_push, profile.share_streak = body.weekly, body.share_streak
+    db.commit()
+    return _profile_dict(db, user, profile)
+
+
+@router.get("/push/key")
+def push_key(_: User = Depends(auth.current_user)):
+    return {"public_key": get_settings().vapid_public_key if push.enabled() else None}
+
+
+class SubscriptionKeys(BaseModel):
+    p256dh: str = Field(max_length=200)
+    auth: str = Field(max_length=100)
+
+
+class SubscriptionIn(BaseModel):
+    endpoint: str = Field(pattern="^https://", max_length=1000)
+    keys: SubscriptionKeys
+
+
+@router.post("/push/subscribe")
+def push_subscribe(body: SubscriptionIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    # The same device signing in as someone else moves to that account.
+    sub = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint))
+    if sub is None:
+        sub = PushSubscription(endpoint=body.endpoint, user_id=user.id, p256dh=body.keys.p256dh, auth=body.keys.auth)
+        db.add(sub)
+    else:
+        sub.user_id, sub.p256dh, sub.auth = user.id, body.keys.p256dh, body.keys.auth
+    db.commit()
+    return {"ok": True}
+
+
+class EndpointIn(BaseModel):
+    endpoint: str
+
+
+@router.post("/push/unsubscribe")
+def push_unsubscribe(body: EndpointIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    sub = db.scalar(select(PushSubscription).where(PushSubscription.endpoint == body.endpoint,
+                                                   PushSubscription.user_id == user.id))
+    if sub is not None:
+        db.delete(sub)
+        db.commit()
+    return {"ok": True}
+
+
+@router.post("/push/test")
+def push_test(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    sent = push.send(db, user, "🥗 Уведомления работают", "Так будут выглядеть напоминания.")
+    if not sent:
+        raise HTTPException(status_code=400, detail="Не удалось отправить: включи уведомления на этом устройстве")
+    return {"sent": sent}
+
+
+# ---------- shared streaks ----------
+
+@router.get("/streaks")
+def streaks(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """Streaks of everyone who chose to share theirs; visible only to those who share too."""
+    mine = db.get(Profile, user.id)
+    if mine is None or not mine.share_streak:
+        return {"joined": False, "people": []}
+    people = []
+    for u in db.scalars(select(User).join(Profile, Profile.user_id == User.id).where(Profile.share_streak.is_(True))):
+        n, today_logged = diary.streak(db, u, diary.today(u))
+        people.append({"name": u.username, "streak": n, "today": today_logged, "me": u.id == user.id})
+    people.sort(key=lambda p: (-p["streak"], not p["me"], p["name"]))
+    return {"joined": True, "people": people}

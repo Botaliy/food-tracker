@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     default_daily_limit_usd: float = 0.30
     monthly_limit_usd: float = 15.0
 
+    # Web Push keys: generate with `python -m scripts.vapid`. Empty = no push.
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = ""  # a mailto: or https: contact the push services may use
+    # The reminder loop; tests switch it off.
+    scheduler_enabled: bool = True
+
     # Timezone of new users until their browser reports its own.
     timezone: str = "Europe/Berlin"
 

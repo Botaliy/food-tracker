@@ -379,6 +379,142 @@ def test_stats_adaptive_needs_data_then_suggests(client):
     assert ad["tdee"] == 2550 and ad["suggested"]["kcal"] == 2550  # no profile: keep weight
 
 
+# ---------- reminders & shared streaks ----------
+
+SUB = {"endpoint": "https://web.push.apple.com/abc", "keys": {"p256dh": "BPk", "auth": "xyz"}, "expirationTime": None}
+
+
+def _at_local(day, hour):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime(day.year, day.month, day.day, hour, 5, tzinfo=ZoneInfo("Europe/Berlin"))
+
+
+def test_push_subscription_moves_between_accounts(client, db):
+    from app.models import PushSubscription
+    assert client.post("/api/push/subscribe", json=SUB).status_code == 200
+    assert client.post("/api/push/subscribe", json=SUB).status_code == 200  # same device twice: one row
+    assert db.query(PushSubscription).count() == 1
+    assert client.post("/api/push/subscribe", json={**SUB, "endpoint": "http://evil"}).status_code == 422
+    assert client.get("/api/profile").json()["notify"]["devices"] == 1
+    client.post("/api/push/unsubscribe", json={"endpoint": SUB["endpoint"]})
+    assert db.query(PushSubscription).count() == 0
+
+
+def test_evening_reminder_once_and_only_when_empty(client, db):
+    from datetime import timedelta
+    from app import reminders
+    from app.models import Profile
+    today = _local_today()
+    for k in (1, 2, 3):
+        _eat(client, f"{today - timedelta(days=k)}T12:00:00", 100)
+    client.post("/api/push/subscribe", json=SUB)
+    sent = []
+    fake_send = lambda db_, user, title, body, url="/": sent.append((user.username, title, body)) or 1
+
+    assert reminders.run_due(db, _at_local(today, 20), fake_send) == []  # before 21:00
+    done = reminders.run_due(db, _at_local(today, 21), fake_send)
+    assert [k for _, k in done] == ["evening"]
+    assert "Серия 3" in sent[0][1]
+    assert reminders.run_due(db, _at_local(today, 22), fake_send) == []  # not twice a day
+
+    # Once the day is logged there's nothing to remind about.
+    _eat(client, f"{today}T12:00:00", 100)
+    db.expire_all()
+    db.get(Profile, client.get("/api/me").json()["id"]).last_evening_push = None
+    db.commit()
+    assert reminders.run_due(db, _at_local(today, 21), fake_send) == []
+
+
+def test_weekly_review_push_on_monday(client, db, fake_reviewer, monkeypatch):
+    from datetime import timedelta
+    from app import reminders
+    today = _local_today()
+    monday = today - timedelta(days=today.weekday())
+    for k in range(1, 5):
+        _eat(client, f"{monday - timedelta(days=k)}T12:00:00", 100)
+    client.post("/api/push/subscribe", json=SUB)
+    client.put("/api/profile/notify", json={"evening": False, "hour": 21, "weekly": True, "share_streak": False})
+    sent = []
+    fake_send = lambda db_, user, title, body, url="/": sent.append((title, body, url)) or 1
+
+    from app import diary
+    monkeypatch.setattr(diary, "today", lambda user: monday)  # the review is made "on Monday"
+    assert reminders.run_due(db, _at_local(monday, 9), fake_send) == []
+    assert [k for _, k in reminders.run_due(db, _at_local(monday, 10), fake_send)] == ["weekly"]
+    assert reminders.run_due(db, _at_local(monday, 11), fake_send) == []
+    assert sent == [("✨ Обзор недели готов", REVIEW["summary"], "/#reports")]
+    assert fake_reviewer.calls == 1
+
+
+def test_shared_streaks_are_opt_in(client, db):
+    from datetime import timedelta
+    from fastapi.testclient import TestClient
+    from app import main as app_main
+    today = _local_today()
+    _eat(client, f"{today - timedelta(days=1)}T12:00:00", 100)
+    assert client.get("/api/streaks").json() == {"joined": False, "people": []}
+    notify = {"evening": True, "hour": 21, "weekly": True, "share_streak": True}
+    client.put("/api/profile/notify", json=notify)
+    make_user(db, "alina")
+    make_user(db, "boris")  # doesn't share: not listed
+    with TestClient(app_main.app) as other:
+        other.post("/api/auth/login", json={"username": "alina", "password": "password1"})
+        other.put("/api/profile/notify", json=notify)
+        other.post("/api/meals", json={"items": [{"name": "x", "grams": 10, "kcal_100": 1, "protein_100": 0, "fat_100": 0, "carbs_100": 0}]})
+        people = other.get("/api/streaks").json()["people"]
+    assert people == [  # longest first; on a tie, you first
+        {"name": "alina", "streak": 1, "today": True, "me": True},
+        {"name": "admin", "streak": 1, "today": False, "me": False},
+    ]
+
+
+def test_push_send_drops_gone_devices(client, db, monkeypatch):
+    from types import SimpleNamespace
+    from app import push
+    from app.config import get_settings
+    from app.models import PushSubscription, User
+    from pywebpush import WebPushException
+    private, public = push.generate_keys()
+    s = get_settings()
+    monkeypatch.setattr(s, "vapid_private_key", private)
+    monkeypatch.setattr(s, "vapid_public_key", public)
+    monkeypatch.setattr(s, "vapid_subject", "mailto:test@example.com")
+    client.post("/api/push/subscribe", json=SUB)
+    client.post("/api/push/subscribe", json={**SUB, "endpoint": "https://fcm.googleapis.com/gone"})
+    calls = []
+
+    def fake_webpush(subscription_info, data, **kw):
+        calls.append((subscription_info["endpoint"], json.loads(data), kw["vapid_claims"]))
+        if "gone" in subscription_info["endpoint"]:
+            raise WebPushException("gone", response=SimpleNamespace(status_code=410))
+
+    monkeypatch.setattr(push, "webpush", fake_webpush)
+    user = db.query(User).filter_by(username="admin").one()
+    assert push.send(db, user, "Заголовок", "Текст") == 1
+    assert calls[0][1] == {"title": "Заголовок", "body": "Текст", "url": "/"}
+    assert calls[0][2] == {"sub": "mailto:test@example.com"}
+    assert [p.endpoint for p in db.query(PushSubscription)] == [SUB["endpoint"]]
+    assert client.get("/api/push/key").json() == {"public_key": public}
+
+
+def test_new_model_columns_are_added_to_old_tables(tmp_path):
+    from sqlalchemy import create_engine, text
+    from app import database
+    engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE profiles (user_id INTEGER PRIMARY KEY, activity FLOAT)"))
+        conn.execute(text("INSERT INTO profiles (user_id, activity) VALUES (1, 1.2)"))
+        orig = database.engine
+        database.engine = engine
+        try:
+            database._add_missing_columns(conn)
+        finally:
+            database.engine = orig
+        row = conn.execute(text("SELECT remind_evening, remind_hour, share_streak, sex FROM profiles")).one()
+    assert tuple(row) == (1, 21, 0, None)
+
+
 # ---------- invites ----------
 
 def test_invite_flow(client):

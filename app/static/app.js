@@ -128,7 +128,9 @@ function renderAuth(error = "") {
 async function loadDay() {
   state.view = "day";
   try {
-    state.dayData = await api(`/api/day?date=${state.day}`);
+    const [dayData, streaks] = await Promise.all([api(`/api/day?date=${state.day}`), api("/api/streaks").catch(() => null)]);
+    state.dayData = dayData;
+    state.streaks = streaks;
     renderDay();
   } catch (err) {
     if (err.status === 401) return renderAuth();
@@ -218,6 +220,7 @@ function renderDay() {
             <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
     </div>
+    ${streaksRow(state.streaks)}
     ${meals.length
       ? `<h3 class="sub">Приёмы пищи</h3>${meals.map(mealCard).join("")}`
       : `<div class="empty"><div class="empty-ico">📸</div><b>Пока пусто</b>
@@ -225,6 +228,14 @@ function renderDay() {
 }
 
 const fmtInt = (n) => r0(n).toLocaleString("ru-RU");
+
+function streaksRow(st) {
+  if (!st?.joined || !st.people.length) return "";
+  const chips = st.people.map((p) => `<span class="chip ${p.me ? "me" : ""}" title="${p.today ? "сегодня записано" : "сегодня ещё пусто"}">
+    ${p.today ? "✅" : "⏳"} ${esc(p.me ? "ты" : p.name)} <b>${p.streak}</b></span>`).join("");
+  return `<div class="streaks"><span class="streaks-title">🔥 Серии</span>${chips}
+    ${st.people.length === 1 ? '<span class="muted small">Пока участвуешь только ты</span>' : ""}</div>`;
+}
 
 function activityLine(a) {
   if (!a || (a.active_kcal == null && a.steps == null)) return "";
@@ -762,6 +773,7 @@ async function openSettings() {
     </form>
     <div class="card" id="profile-card"><div class="spinner"></div></div>
     <div class="card" id="health-card"></div>
+    <div class="card" id="notify-card"></div>
     <div class="card small">
       <div>Вы вошли как <b>${esc(me.username)}</b></div>
       <div class="muted">Распознавания сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</div>
@@ -837,6 +849,7 @@ function renderProfile(p) {
   };
   if (f) $("#apply-formula").onclick = () => applyGoals(f.suggested);
   renderHealth(p.health);
+  renderNotify(p.notify);
 }
 
 function renderHealth(h, token = null) {
@@ -879,6 +892,81 @@ function renderHealth(h, token = null) {
   };
 }
 
+// ---------- push reminders ----------
+
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+
+function b64ToBytes(b64) {
+  const s = atob(b64.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (b64.length % 4)) % 4));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+}
+
+async function deviceSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function enablePush() {
+  const { public_key: key } = await api("/api/push/key");
+  if (!key) throw new Error("Уведомления на сервере пока не настроены");
+  if ((await Notification.requestPermission()) !== "granted") throw new Error("Уведомления запрещены — разреши их в настройках телефона");
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) });
+  await api("/api/push/subscribe", { method: "POST", json: sub.toJSON() });
+}
+
+async function renderNotify(n) {
+  const box = $("#notify-card");
+  if (!box) return;
+  let device;
+  if (!pushSupported()) {
+    device = isIOS && !isStandalone()
+      ? '<p class="small">Чтобы получать напоминания на iPhone, добавь приложение на экран «Домой»: «Поделиться» → «На экран «Домой»», и открой его оттуда.</p>'
+      : '<p class="small muted">Этот браузер не поддерживает уведомления.</p>';
+  } else {
+    const sub = await deviceSubscription().catch(() => null);
+    device = sub
+      ? `<p class="small">Уведомления на этом устройстве включены.</p>
+         <div class="row"><button class="grow" id="push-test">Проверить</button><button class="grow danger" id="push-off">Выключить</button></div>`
+      : '<button class="primary block" id="push-on">Включить уведомления</button>';
+  }
+  const hours = [17, 18, 19, 20, 21, 22, 23].map((h) => `<option value="${h}" ${h === n.hour ? "selected" : ""}>${h}:00</option>`).join("");
+  box.innerHTML = `
+    <b>🔔 Напоминания и серии</b>
+    <div style="margin:8px 0 4px">${device}</div>
+    <form id="notify-form" class="toggles">
+      <label class="check"><input type="checkbox" name="evening" ${n.evening ? "checked" : ""}> Напомнить вечером, если день пустой, в <select name="hour">${hours}</select></label>
+      <label class="check"><input type="checkbox" name="weekly" ${n.weekly ? "checked" : ""}> Обзор недели по понедельникам</label>
+      <label class="check"><input type="checkbox" name="share_streak" ${n.share_streak ? "checked" : ""}> Участвовать в общих сериях <span class="muted small">— твою серию увидят те, кто тоже участвует</span></label>
+    </form>`;
+  $("#notify-form").onchange = async (e) => {
+    const f = e.currentTarget;
+    try {
+      const p = await api("/api/profile/notify", { method: "PUT", json: {
+        evening: f.evening.checked, hour: +f.hour.value, weekly: f.weekly.checked, share_streak: f.share_streak.checked } });
+      toast("Сохранено");
+      if (e.target.name === "share_streak") state.streaks = await api("/api/streaks").catch(() => null);
+      n = p.notify;
+    } catch (err) { toast(err.message); }
+  };
+  $("#push-on")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try { await enablePush(); toast("Уведомления включены"); } catch (err) { toast(err.message); }
+    renderNotify(n);
+  });
+  $("#push-test")?.addEventListener("click", async () => {
+    try { await api("/api/push/test", { method: "POST" }); toast("Отправил — проверь уведомления"); } catch (err) { toast(err.message); }
+  });
+  $("#push-off")?.addEventListener("click", async () => {
+    const sub = await deviceSubscription();
+    if (sub) { await api("/api/push/unsubscribe", { method: "POST", json: { endpoint: sub.endpoint } }).catch(() => {}); await sub.unsubscribe(); }
+    renderNotify(n);
+  });
+}
+
 async function renderAdmin() {
   const box = $("#admin");
   if (!box) return;
@@ -914,7 +1002,9 @@ async function start() {
   try {
     state.me = await api("/api/me");
     if (state.me.timezone !== TZ) api("/api/me", { method: "PUT", json: { ...state.me.goals, timezone: TZ } }).then((m) => (state.me = m)).catch(() => {});
-    await loadDay();
+    // A tap on the weekly review notification opens /#reports.
+    if (location.hash === "#reports") { history.replaceState(null, "", "/"); await loadStats(); }
+    else await loadDay();
   } catch (err) {
     if (err.status === 401) renderAuth();
     else app.innerHTML = `<div class="card error">${esc(err.message)}</div>`;

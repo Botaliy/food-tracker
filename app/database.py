@@ -58,8 +58,26 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     with engine.begin() as conn:
+        _add_missing_columns(conn)
         for stmt in FTS_SQL:
             conn.execute(text(stmt))
+
+
+def _add_missing_columns(conn) -> None:
+    """create_all makes new tables but never touches existing ones. A column added to a
+    model later is added here, with its scalar default, so the server needs no migration step."""
+    for table in Base.metadata.sorted_tables:
+        have = {row[1] for row in conn.execute(text(f'PRAGMA table_info("{table.name}")'))}
+        if not have:
+            continue
+        for col in table.columns:
+            if col.name in have:
+                continue
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine.dialect)}'
+            default = col.default.arg if col.default is not None and col.default.is_scalar else None
+            if default is not None:
+                ddl += f" NOT NULL DEFAULT {int(default) if isinstance(default, bool) else repr(default)}"
+            conn.execute(text(ddl))
 
 
 def get_session() -> Session:

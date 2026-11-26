@@ -264,3 +264,13 @@ button.recent > .small { text-align: right; white-space: nowrap; }
 .howto { padding-left: 18px; margin: 12px 0; }
 .howto li { margin: 6px 0; }
 code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--track); padding: 1px 5px; border-radius: 6px; }
+
+/* reminders & shared streaks */
+.toggles { margin-top: 10px; }
+label.check { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: var(--text); font-size: 15px; margin: 10px 0; }
+label.check input[type=checkbox] { width: 20px; height: 20px; accent-color: var(--accent); flex: none; }
+label.check select { width: auto; padding: 5px 8px; }
+.streaks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 2px 0; }
+.streaks-title { font-size: 13px; font-weight: 600; color: var(--muted); margin-right: 2px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 99px; background: var(--card); box-shadow: var(--shadow); border: 1px solid var(--card-border); font-size: 14px; }
+.chip.me { background: var(--accent-soft); }

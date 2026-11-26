@@ -63,3 +63,13 @@ crontab -e   # 15 3 * * * /root/food-tracker/scripts/backup.sh >> /var/log/food-
 ```
 
 Восстановление: остановить контейнер, `gunzip` копию в `data/food.db`, удалить `food.db-wal` и `food.db-shm`, запустить.
+
+## Напоминания (Web Push)
+
+Один раз на сервере сгенерировать ключи и дописать в `.env` вместе с `VAPID_SUBJECT` (`mailto:` или `https:` для связи):
+
+```bash
+docker compose exec food-tracker python -m scripts.vapid
+```
+
+На iPhone уведомления приходят только приложению, добавленному на экран «Домой» (iOS 16.4+). Включаются в настройках приложения. Новые ключи отменяют все подписки устройств.
