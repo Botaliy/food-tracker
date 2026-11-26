@@ -8,7 +8,7 @@ picks between close text matches and stands in when nothing fits.
 import re
 from dataclasses import dataclass
 
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models import Food
@@ -46,9 +46,24 @@ def _match(db: Session, query: str, n: int) -> list[int]:
     ).scalars())
 
 
+def visible_to(user_id: int | None):
+    """SQL condition: everything but other people's recipes."""
+    if user_id is None:
+        return Food.source != "recipe"
+    return or_(Food.source != "recipe", Food.owner_id == user_id)
+
+
+def usable(food: Food | None, user_id: int) -> Food | None:
+    """The food if this user may log it: someone else's recipe is not theirs to read."""
+    if food is None or (food.source == "recipe" and food.owner_id != user_id):
+        return None
+    return food
+
+
 def search(db: Session, phrase: str, user_id: int | None, limit: int = CANDIDATES) -> list[Food]:
     """Foods best matching a phrase (English or Russian). Foods people added (by hand or by
-    barcode) are shared by everyone here: the user's own first, then the others', then USDA."""
+    barcode) are shared by everyone here: the user's own first, then the others', then USDA.
+    Recipes are the exception: only their owner ever sees them."""
     any_word = fts_query(phrase)
     if any_word is None:
         return []
@@ -62,7 +77,7 @@ def search(db: Session, phrase: str, user_id: int | None, limit: int = CANDIDATE
     foods = {
         f.id: f
         for f in db.scalars(
-            select(Food).where(Food.id.in_(rows))
+            select(Food).where(Food.id.in_(rows), visible_to(user_id))
         )
     }
     ranked = [foods[r] for r in rows if r in foods]
@@ -116,7 +131,7 @@ def extra_totals(items) -> dict[str, float | None]:
 
 
 def food_dict(food: Food) -> dict:
-    return {
+    out = {
         "food_id": food.id,
         "source": food.source,
         "name": food.name_ru or food.name,
@@ -129,3 +144,6 @@ def food_dict(food: Food) -> dict:
         "sugar_100": _r(food.sugar),
         "salt_100": _r(food.salt, 2),
     }
+    if food.source == "recipe":  # the usual helping is where logging a dish starts
+        out["portion_grams"] = food.portion_grams
+    return out

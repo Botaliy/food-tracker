@@ -15,13 +15,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, barcodes, coach, corrections, diary, energy, foods, insights, photos, push, review as review_mod, usage
+from app import auth, barcodes, coach, corrections, diary, energy, foods, insights, photos, push, recipes, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
-from app.drafts import build_draft
+from app.drafts import build_draft, build_recipe_draft
 from app.images import release_memory, shrink
-from app.models import Activity, ChatMessage, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Water, Weight, utcnow
-from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
+from app.models import (Activity, ChatMessage, Food, Invite, Meal, MealItem, Profile, PushSubscription, RecipeItem, Review, User,
+                        Water, Weight, utcnow)
+from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize, recognize_recipe
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
@@ -136,6 +137,21 @@ def update_me(body: GoalsIn, user: User = Depends(auth.current_user), db: Sessio
 
 # ---------- recognition ----------
 
+def _read_photo(photo: UploadFile | None) -> bytes | None:
+    """The upload shrunk to a JPEG for the model, or None without one."""
+    if photo is None or not photo.filename:
+        return None
+    raw = photo.file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Фото слишком большое")
+    image = shrink(raw)
+    del raw
+    release_memory()
+    if image is None:
+        raise HTTPException(status_code=400, detail="Не получилось открыть фото")
+    return image
+
+
 @router.post("/recognize")
 def recognize_meal(
     photo: UploadFile | None = File(None),
@@ -146,17 +162,7 @@ def recognize_meal(
     if problem := usage.limit_problem(db, user):
         raise HTTPException(status_code=429, detail=problem)
 
-    image = None
-    if photo is not None and photo.filename:
-        raw = photo.file.read(MAX_UPLOAD_BYTES + 1)
-        if len(raw) > MAX_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Фото слишком большое")
-        image = shrink(raw)
-        del raw
-        release_memory()
-        if image is None:
-            raise HTTPException(status_code=400, detail="Не получилось открыть фото")
-
+    image = _read_photo(photo)
     model = get_settings().recognize_model
     hints = corrections.hints(db, user)
     try:
@@ -284,16 +290,21 @@ def _item(db: Session, body: ItemIn, user: User) -> MealItem:
         ai_grams=body.ai_grams,
     )
     # A database food's numbers are taken from the database, not from the client.
-    food = db.get(Food, body.food_id) if body.food_id is not None else None
+    food = foods.usable(db.get(Food, body.food_id), user.id) if body.food_id is not None else None
     if food is not None:
-        item.food_id, item.source = food.id, food.source
-        item.kcal_100, item.protein_100, item.fat_100, item.carbs_100 = food.kcal, food.protein, food.fat, food.carbs
-        # Where the database knows fibre/sugar/salt it wins; where it doesn't, the client's
-        # value (the model's estimate from the draft) is kept.
-        for key in foods.EXTRA:
-            if (v := getattr(food, key)) is not None:
-                setattr(item, f"{key}_100", v)
+        item.food_id = food.id
+        _copy_food(item, food)
     return item
+
+
+def _copy_food(item: MealItem | RecipeItem, food: Food) -> None:
+    item.source = food.source
+    item.kcal_100, item.protein_100, item.fat_100, item.carbs_100 = food.kcal, food.protein, food.fat, food.carbs
+    # Where the database knows fibre/sugar/salt it wins; where it doesn't, the client's
+    # value (the model's estimate from the draft) is kept.
+    for key in foods.EXTRA:
+        if (v := getattr(food, key)) is not None:
+            setattr(item, f"{key}_100", v)
 
 
 def _totals(items) -> dict:
@@ -417,6 +428,168 @@ def _recent(db: Session, user: User, limit: int) -> list[dict]:
             groups[key] = {"count": 1, "meal": m}
     ranked = sorted(groups.values(), key=lambda g: (-g["count"], -g["meal"].eaten_at.timestamp()))
     return [{**_meal_dict(g["meal"], user.timezone), "count": g["count"]} for g in ranked[:limit]]
+
+
+# ---------- own dishes (recipes) ----------
+# A dish is a Food (source "recipe") only its owner sees, so search, the meal editor
+# and logged meals treat it like any other food.
+
+class IngredientIn(BaseModel):
+    name: str = Field(min_length=1, max_length=300)
+    grams: float = Field(gt=0, le=10000)  # a whole pot, not one helping
+    food_id: int | None = None
+    source: str = "estimate"
+    kcal_100: float = Field(ge=0, le=900)
+    protein_100: float = Field(ge=0, le=100)
+    fat_100: float = Field(ge=0, le=100)
+    carbs_100: float = Field(ge=0, le=100)
+    fiber_100: float | None = Field(None, ge=0, le=100)  # None = unknown
+    sugar_100: float | None = Field(None, ge=0, le=100)
+    salt_100: float | None = Field(None, ge=0, le=100)
+
+
+class RecipeIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    items: list[IngredientIn] = Field(min_length=1, max_length=40)
+    cooked_grams: float | None = Field(None, gt=0, le=50000)  # None = the sum of the ingredients
+    portion_grams: float | None = Field(None, gt=0, le=5000)
+
+
+def _own_recipe(db: Session, recipe_id: int, user: User) -> Food:
+    food = db.get(Food, recipe_id)
+    if food is None or food.source != "recipe" or food.owner_id != user.id:
+        raise HTTPException(status_code=404, detail="Блюдо не найдено")
+    return food
+
+
+def _recipe_dict(food: Food, ingredients: bool = False) -> dict:
+    out = {
+        **foods.food_dict(food),
+        "id": food.id,
+        "name": food.name,
+        "cooked_grams": food.cooked_grams,
+        "portion_grams": food.portion_grams,
+        "raw_grams": round(sum(i.grams for i in food.recipe_items), 1),
+        "ingredient_count": len(food.recipe_items),
+        "portion_kcal": round(food.kcal * food.portion_grams / 100) if food.portion_grams else None,
+    }
+    if ingredients:
+        out["items"] = [
+            {
+                "id": i.id, "name": i.name, "grams": i.grams, "food_id": i.ingredient_food_id, "source": i.source,
+                "kcal_100": i.kcal_100, "protein_100": i.protein_100, "fat_100": i.fat_100, "carbs_100": i.carbs_100,
+                "fiber_100": i.fiber_100, "sugar_100": i.sugar_100, "salt_100": i.salt_100,
+            }
+            for i in food.recipe_items
+        ]
+    return out
+
+
+def _ingredient(db: Session, body: IngredientIn, user: User, dish_id: int | None) -> RecipeItem:
+    item = RecipeItem(
+        name=body.name.strip(), grams=body.grams, source=body.source if body.source in {"estimate", "manual"} else "estimate",
+        kcal_100=body.kcal_100, protein_100=body.protein_100, fat_100=body.fat_100, carbs_100=body.carbs_100,
+        fiber_100=body.fiber_100, sugar_100=body.sugar_100, salt_100=body.salt_100,
+    )
+    food = foods.usable(db.get(Food, body.food_id), user.id) if body.food_id is not None else None
+    if food is not None:
+        if dish_id is not None and food.id == dish_id:
+            raise HTTPException(status_code=400, detail="Блюдо не может входить само в себя")
+        item.ingredient_food_id = food.id
+        _copy_food(item, food)
+    return item
+
+
+def _fill_recipe(db: Session, food: Food, body: RecipeIn, user: User) -> None:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Назови блюдо")
+    items = [_ingredient(db, i, user, food.id) for i in body.items]
+    try:
+        values = recipes.per100(items, body.cooked_grams)
+        recipes.check_plausible(values)
+    except recipes.RecipeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    food.name = food.name_ru = name
+    food.kcal, food.protein, food.fat, food.carbs = (values[k] for k in recipes.MACROS)
+    food.fiber, food.sugar, food.salt = (values[k] for k in foods.EXTRA)
+    food.cooked_grams, food.portion_grams = body.cooked_grams, body.portion_grams
+    # Meals already logged from the dish keep their copied numbers: only the food row changes.
+    food.recipe_items = items
+
+
+@router.get("/recipes")
+def list_recipes(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    dishes = list(db.scalars(
+        select(Food).where(Food.source == "recipe", Food.owner_id == user.id).options(selectinload(Food.recipe_items))
+    ))
+    # The ones logged most recently first, then the newest.
+    last = dict(db.execute(
+        select(MealItem.food_id, func.max(MealItem.id))
+        .join(Meal, Meal.id == MealItem.meal_id)
+        .where(Meal.user_id == user.id, MealItem.food_id.in_([f.id for f in dishes]))
+        .group_by(MealItem.food_id)
+    ).all()) if dishes else {}
+    dishes.sort(key=lambda f: (last.get(f.id, 0), f.id), reverse=True)
+    return [_recipe_dict(f) for f in dishes]
+
+
+@router.get("/recipes/{recipe_id}")
+def get_recipe(recipe_id: int, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    return _recipe_dict(_own_recipe(db, recipe_id, user), ingredients=True)
+
+
+@router.post("/recipes")
+def add_recipe(body: RecipeIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    food = Food(source="recipe", owner_id=user.id)
+    _fill_recipe(db, food, body, user)
+    db.add(food)
+    db.commit()
+    return _recipe_dict(food, ingredients=True)
+
+
+@router.put("/recipes/{recipe_id}")
+def update_recipe(recipe_id: int, body: RecipeIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    food = _own_recipe(db, recipe_id, user)
+    _fill_recipe(db, food, body, user)
+    db.commit()
+    return _recipe_dict(food, ingredients=True)
+
+
+@router.delete("/recipes/{recipe_id}")
+def delete_recipe(recipe_id: int, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """Meals logged from the dish stay: their items lose the link (food_id SET NULL), not their numbers."""
+    db.delete(_own_recipe(db, recipe_id, user))
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/recipes/draft")
+def recipe_draft(
+    photo: UploadFile | None = File(None),
+    note: str = Form(""),
+    user: User = Depends(auth.current_user),
+    db: Session = Depends(get_db),
+):
+    """A dish from a description or a photo (ingredients, a written recipe, a screenshot), for the user
+    to check before saving. Same model, limits and accounting as /api/recognize; no thumbnail is kept."""
+    if problem := usage.limit_problem(db, user):
+        raise HTTPException(status_code=429, detail=problem)
+    image = _read_photo(photo)
+    model = get_settings().recognize_model
+    try:
+        result = recognize_recipe(image, note[:2000])
+    except RecognizeErrorWithResponse as exc:
+        usage.record_call(db, user, exc.response, model=model, error=str(exc))
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except RecognizeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    del image
+    cost = usage.record_call(db, user, result.response, model=model)
+    draft = build_recipe_draft(db, result.recipe, user.id)
+    draft["cost_usd"] = round(cost, 4)
+    draft["spent_today"] = round(usage.spent_today(db, user), 4)
+    return draft
 
 
 @router.get("/day")

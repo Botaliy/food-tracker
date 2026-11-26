@@ -3,7 +3,7 @@
 from sqlalchemy.orm import Session
 
 from app import foods
-from app.recognize import Recognition, RecognizedItem
+from app.recognize import RecipeRecognition, Recognition, RecognizedItem
 
 
 def _estimate(item: RecognizedItem) -> dict:
@@ -45,6 +45,16 @@ def draft_item(db: Session, item: RecognizedItem, user_id: int) -> dict:
         "ai_grams": round(item.grams),
         "confidence": item.confidence,
         "options": options,
+    }
+
+
+def build_recipe_draft(db: Session, recipe: RecipeRecognition, user_id: int) -> dict:
+    """The same matching as a meal's, for a dish's raw ingredients."""
+    return {
+        "title": recipe.title,
+        "comment": recipe.comment,
+        "cooked_grams": round(recipe.cooked_grams) if recipe.cooked_grams else None,
+        "items": [draft_item(db, item, user_id) for item in recipe.items],
     }
 
 

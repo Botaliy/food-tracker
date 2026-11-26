@@ -16,14 +16,15 @@ from sqlalchemy import delete  # noqa: E402
 from app.auth import hash_password  # noqa: E402
 from app.database import SessionLocal, init_db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import Activity, ApiCall, ChatMessage, Food, Invite, Meal, Profile, PushSubscription, Review, User, Water, Weight  # noqa: E402
+from app.models import (Activity, ApiCall, ChatMessage, Food, Invite, Meal, Profile, PushSubscription, RecipeItem, Review,  # noqa: E402
+                        User, Water, Weight)
 
 
 @pytest.fixture(autouse=True)
 def clean_db():
     init_db()
     with SessionLocal() as db:
-        for model in (ApiCall, Review, ChatMessage, Activity, PushSubscription, Water, Profile, Weight, Meal, Invite, Food, User):
+        for model in (ApiCall, Review, ChatMessage, Activity, PushSubscription, Water, Profile, Weight, Meal, Invite, RecipeItem, Food, User):
             db.execute(delete(model))
         db.commit()
     yield

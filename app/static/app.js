@@ -47,6 +47,7 @@ function toast(text, action = null) {
 }
 
 function openSheet(html) {
+  stopVoice(true); // the textarea it was typing into is about to go
   sheetBody.innerHTML = html;
   sheet.hidden = false;
   document.documentElement.classList.add("sheet-open");
@@ -54,6 +55,7 @@ function openSheet(html) {
 }
 function closeSheet() {
   stopScan();
+  stopVoice(true);
   if (draft && !draft.id && draft.items.length) {
     stashDraft();
     toast("Черновик сохранён — вернёшь его через «+»");
@@ -62,6 +64,7 @@ function closeSheet() {
   document.documentElement.classList.remove("sheet-open");
   sheetBody.innerHTML = "";
   draft = null;
+  dish = null;
 }
 
 // An unsaved new meal survives closing the sheet and the app itself: recognition costs money.
@@ -218,6 +221,8 @@ const ICONS = Object.fromEntries(Object.entries({
   logout: '<path d="M14 4.5H7A1.5 1.5 0 0 0 5.5 6v12A1.5 1.5 0 0 0 7 19.5h7M10.5 12h9M16.5 8.5l3.5 3.5-3.5 3.5"/>',
   replay: '<path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/>',
   download: '<path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19.5h14"/>',
+  mic: '<rect x="9" y="3.5" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v2.5"/>',
+  pot: '<path d="M4.5 10h15v6.5a3 3 0 0 1-3 3h-9a3 3 0 0 1-3-3z"/><path d="M2.5 10h19M9 6.5c0-1 .8-1.5.8-2.5M14 6.5c0-1 .8-1.5.8-2.5"/>',
   // Parts of the day for meals without a photo, and the observations from /api/insights.
   cup: '<path d="M5 9h11v4.5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10.5h1.5a2.5 2.5 0 0 1 0 5H16M8.5 3.5v2.5M12 3.5v2.5"/>',
   bowl: '<path d="M4 11h16a8 8 0 0 1-16 0z"/><path d="M9.5 21h5M9 7.5c0-1.5 1-1.5 1-3M13.5 7.5c0-1.5 1-1.5 1-3"/>',
@@ -289,6 +294,7 @@ function showSkeleton(view) {
 
 const tabbar = $("#tabbar");
 function showTabs(active) {
+  stopVoice(true);
   const tab = (id, icon, label) => `<button data-tab="${id}" class="${active === id ? "on" : ""}">${icon}<span>${label}</span></button>`;
   tabbar.innerHTML = `
     ${tab("day", ICONS.diary, "Дневник")}
@@ -960,15 +966,20 @@ function openAdd() {
     <details class="describe" id="describe">
       <summary class="with-ico">${ICONS.pencil}Описать словами или уточнить к фото</summary>
       <textarea id="note" placeholder="Например: 2 яйца и тост с маслом. К фото: рис 150 г, жарено на масле"></textarea>
-      <button class="primary block" id="recognize" style="margin-top:8px">Посчитать</button>
+      <div class="row voice-row">${micButton("note")}<button class="primary grow" id="recognize">Посчитать</button></div>
     </details>
     <div class="error" id="add-error"></div>
+    <div id="dishes"></div>
     <div id="recent"><h3 class="sub">Часто ешь</h3><div class="skeleton"></div><div class="skeleton"></div></div>
-    <button class="block ghost-line" id="manual">Собрать вручную</button>
+    <div class="row add-more">
+      <button class="grow ghost-line" id="manual">Собрать вручную</button>
+      <button class="grow ghost-line with-ico" id="dish-new">${ICONS.pot}Новое блюдо</button>
+    </div>
     <p class="muted small center" id="spent"></p>`);
   const me = state.me;
   if (me) $("#spent").textContent = `Распознавания сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}`;
   loadRecent();
+  loadDishes();
 }
 
 let recentMeals = [];
@@ -1017,6 +1028,15 @@ function repeatMeal(m) {
 }
 
 sheetBody.addEventListener("change", async (e) => {
+  if (e.target.matches("[data-dish-photo]") && dish) {
+    const file = e.target.files?.[0];
+    const mine = dish;
+    if (!file) return;
+    mine.photo = await shrinkPhoto(file);
+    mine.note = $("#dish-note")?.value || mine.note;
+    if (dish === mine) renderDish();
+    return;
+  }
   if (!e.target.matches("[data-photo]")) return;
   const file = e.target.files?.[0];
   if (!file) return;
@@ -1039,7 +1059,7 @@ sheetBody.addEventListener("click", async (e) => {
   const found = e.target.closest("[data-add-found]");
   if (found) {
     const f = addResults[Number(found.dataset.addFound)];
-    return openEditor({ title: "", items: [{ ...f, grams: r0(f.last_grams || 100), options: [f] }], comment: "" });
+    return openEditor({ title: "", items: [{ ...f, grams: startGrams(f), options: [f] }], comment: "" });
   }
   if (e.target.closest("[data-add-custom]")) return openCustomFood($("#add-q").value.trim());
   if (e.target.id === "recognize") recognizeNow();
@@ -1056,6 +1076,7 @@ async function recognizeNow() {
   const form = new FormData();
   if (pendingPhoto) form.append("photo", pendingPhoto, "meal.jpg");
   form.append("note", note);
+  stopVoice(true);
   sheetBody.innerHTML = '<div class="spinner"></div><p class="center muted">Смотрю на тарелку…</p>';
   try {
     const d = await api("/api/recognize", { method: "POST", form });
@@ -1094,7 +1115,9 @@ function openEditor(d) {
 const MEAL_TYPES = [["Завтрак", "08:30"], ["Обед", "13:00"], ["Ужин", "19:00"], ["Перекус", null]];
 const typeOf = (time) => { const h = Number(time.slice(0, 2)); return h < 11 ? "Завтрак" : h < 16 ? "Обед" : h < 22 ? "Ужин" : "Перекус"; };
 
-const SOURCE_LABEL = { usda: "база USDA", off: "Open Food Facts", custom: "мой продукт", estimate: "оценка ИИ", manual: "вручную" };
+const SOURCE_LABEL = { usda: "база USDA", off: "Open Food Facts", custom: "мой продукт", recipe: "моё блюдо", estimate: "оценка ИИ", manual: "вручную" };
+// Where the grams start for a food just picked: last time's helping, a dish's usual portion, else 100 g.
+const startGrams = (f) => r0(f.last_grams || f.portion_grams || (f.source === "recipe" ? DISH_PORTION : 100));
 
 function itemHtml(it, idx) {
   const k = (Number(it.grams) || 0) / 100;
@@ -1148,6 +1171,7 @@ function renderEditor() {
       <input id="food-q" placeholder="Добавить продукт: поиск (рус./англ.)" autocomplete="off">
       <div class="search-results" id="food-results"></div>
     </div>
+    ${draft.items.length >= 2 ? `<button class="block ghost-line with-ico as-dish" id="as-dish">${ICONS.pot}Сохранить как блюдо</button>` : ""}
     <div class="totals">
       <div class="row between"><b id="draft-total"></b><span class="small muted" id="draft-macros"></span></div>
       <button class="primary block" id="save" style="margin-top:8px">${draft.id ? "Сохранить" : "Съел — записать"}</button>
@@ -1163,35 +1187,43 @@ function updateDraftTotals() {
   $("#draft-macros").textContent = `Б ${r0(t.protein)} · Ж ${r0(t.fat)} · У ${r0(t.carbs)}`;
 }
 
+// The item list (itemHtml) is shared by the meal editor and the dish editor: one of them is open.
+const editing = () => draft || dish;
+const rerender = () => (draft ? renderEditor() : renderDish());
+
 function setGrams(idx, grams) {
-  draft.items[idx].grams = Math.max(0, grams);
+  const items = editing().items;
+  items[idx].grams = Math.max(0, grams);
   const input = sheetBody.querySelector(`[data-grams="${idx}"]`);
-  if (input && Number(input.value) !== draft.items[idx].grams) input.value = r0(draft.items[idx].grams);
-  sheetBody.querySelector(`[data-item-total="${idx}"]`).innerHTML = itemTotals(draft.items[idx]);
-  updateDraftTotals();
+  if (input && Number(input.value) !== items[idx].grams) input.value = r0(items[idx].grams);
+  sheetBody.querySelector(`[data-item-total="${idx}"]`).innerHTML = itemTotals(items[idx]);
+  if (draft) updateDraftTotals(); else updateDishResult();
   stashDraft();
 }
 
 sheetBody.addEventListener("input", (e) => {
-  if (!draft) return;
+  const ed = editing();
+  if (!ed) return;
   if (e.target.dataset.grams !== undefined) setGrams(Number(e.target.dataset.grams), Number(e.target.value) || 0);
-  if (e.target.id === "title") draft.title = e.target.value;
-  if (e.target.id === "time") draft.time = e.target.value || draft.time;
-  if (e.target.dataset.name !== undefined) draft.items[Number(e.target.dataset.name)].name = e.target.value;
+  if (e.target.dataset.name !== undefined) ed.items[Number(e.target.dataset.name)].name = e.target.value;
   if (e.target.id === "food-q") searchFoods(e.target.value);
-  stashDraft();
+  if (draft) {
+    if (e.target.id === "title") draft.title = e.target.value;
+    if (e.target.id === "time") draft.time = e.target.value || draft.time;
+    stashDraft();
+  }
 });
 
 sheetBody.addEventListener("change", (e) => {
-  if (!draft || e.target.dataset.opt === undefined) return;
+  if (!editing() || e.target.dataset.opt === undefined) return;
   const idx = Number(e.target.dataset.opt);
-  const it = draft.items[idx];
+  const it = editing().items[idx];
   const o = it.options[Number(e.target.value)];
   // Same rule as the server's: a database value wins, else the model's estimate stays.
   const est = it.options.find((x) => x.source === "estimate");
   Object.assign(it, { food_id: o.food_id, source: o.source, kcal_100: o.kcal_100, protein_100: o.protein_100, fat_100: o.fat_100, carbs_100: o.carbs_100,
     ...Object.fromEntries(EXTRA_KEYS.map((k) => [k, o[k] ?? est?.[k] ?? null])) });
-  renderEditor();
+  rerender();
 });
 
 let searchTimer, searchResults = [];
@@ -1207,14 +1239,14 @@ function searchFoodsInto(q, sel, where) {
       if (where === "add") addResults = res; else searchResults = res;
       const attr = where === "add" ? "data-add-found" : "data-add-food";
       box.innerHTML = res.map((f, j) =>
-        `<button ${attr}="${j}">${esc(f.name)} <span class="muted">${r0(f.kcal_100)} ккал/100 г${f.last_grams ? ` · обычно ${r0(f.last_grams)} г` : ""}</span></button>`).join("")
+        `<button ${attr}="${j}">${esc(f.name)}${f.source === "recipe" ? ' <span class="badge db">блюдо</span>' : ""} <span class="muted">${r0(f.kcal_100)} ккал/100 г${f.last_grams ? ` · обычно ${r0(f.last_grams)} г` : ""}</span></button>`).join("")
         + `<button class="with-ico" ${where === "add" ? "data-add-custom" : "data-custom"}="1">${ICONS.plus}Свой продукт «${esc(q)}»</button>`;
     } catch (err) { box.innerHTML = `<div class="error">${esc(err.message)}</div>`; }
   }, 250);
 }
 
 sheetBody.addEventListener("click", async (e) => {
-  if (!draft) return;
+  if (!editing()) return;
   const t = e.target.closest("button");
   if (!t) return;
   if (t.dataset.type) {
@@ -1225,19 +1257,21 @@ sheetBody.addEventListener("click", async (e) => {
     renderEditor();
   } else if (t.dataset.mult) {
     const idx = Number(t.dataset.i);
-    setGrams(idx, Math.round((Number(draft.items[idx].grams) || 0) * Number(t.dataset.mult)));
+    setGrams(idx, Math.round((Number(editing().items[idx].grams) || 0) * Number(t.dataset.mult)));
   } else if (t.dataset.step) {
     const idx = Number(t.dataset.i);
-    setGrams(idx, (Number(draft.items[idx].grams) || 0) + Number(t.dataset.step));
+    setGrams(idx, (Number(editing().items[idx].grams) || 0) + Number(t.dataset.step));
   } else if (t.dataset.del !== undefined) {
-    draft.items.splice(Number(t.dataset.del), 1);
-    renderEditor();
+    editing().items.splice(Number(t.dataset.del), 1);
+    rerender();
   } else if (t.dataset.addFood !== undefined) {
     const f = searchResults[Number(t.dataset.addFood)];
-    draft.items.push({ ...f, grams: r0(f.last_grams || 100), options: [f] });
-    renderEditor();
+    editing().items.push({ ...f, grams: startGrams(f), options: [f] });
+    rerender();
   } else if (t.dataset.custom) {
     openCustomFood($("#food-q").value.trim());
+  } else if (t.id === "as-dish" && draft) {
+    saveAsDish();
   } else if (t.id === "save") {
     saveDraft(t);
   } else if (t.id === "repeat") {
@@ -1272,9 +1306,9 @@ async function saveDraft(btn) {
 }
 
 function openCustomFood(name, barcode = null, note = "") {
-  const back = draft;
+  const back = draft, backDish = dish;
   openSheet(`
-    <div class="row between"><h2>Свой продукт</h2><button class="ghost" id="cf-back" aria-label="${back ? "Назад" : "Закрыть"}">${back ? ICONS.left : ICONS.close}</button></div>
+    <div class="row between"><h2>Свой продукт</h2><button class="ghost" id="cf-back" aria-label="${back || backDish ? "Назад" : "Закрыть"}">${back || backDish ? ICONS.left : ICONS.close}</button></div>
     ${note ? `<p class="small">${esc(note)}</p>` : ""}
     <form id="cf">
       <label>Название</label><input name="name" value="${esc(name)}" required>
@@ -1293,7 +1327,8 @@ function openCustomFood(name, barcode = null, note = "") {
       <button class="primary block" style="margin-top:14px">Добавить</button>
     </form>`);
   draft = null; // keep editor handlers quiet while this form is open
-  $("#cf-back").onclick = () => { if (back) { draft = back; renderEditor(); } else closeSheet(); };
+  dish = null;
+  $("#cf-back").onclick = () => { if (back) { draft = back; renderEditor(); } else if (backDish) { dish = backDish; renderDish(); } else closeSheet(); };
   $("#cf").onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
@@ -1304,10 +1339,316 @@ function openCustomFood(name, barcode = null, note = "") {
         name: f.name, kcal_100: num(f.kcal_100), protein_100: num(f.protein_100), fat_100: num(f.fat_100), carbs_100: num(f.carbs_100),
         fiber_100: opt(f.fiber_100), sugar_100: opt(f.sugar_100), salt_100: opt(f.salt_100), barcode } });
       if (back) { draft = back; draft.items.push({ ...food, grams: 100, options: [food] }); renderEditor(); }
+      else if (backDish) { dish = backDish; dish.items.push({ ...food, grams: 100, options: [food] }); renderDish(); }
       else openEditor({ title: food.name, items: [{ ...food, grams: 100, options: [food] }], comment: "" });
     } catch (err) { toast(err.message); }
   };
 }
+
+// ---------- own dishes (recipes) ----------
+// A dish is a food of the user's own whose numbers come from its raw ingredients and the
+// weight of the finished pot; logging it is logging a food, with its usual portion.
+
+const DISH_PORTION = 300; // grams, when the dish has no usual portion
+const ADD_DISHES = 5; // shown in the add sheet before «Все блюда»
+let dish = null; // the dish editor's state while it is open (draft is null then)
+let myDishes = [];
+
+const dishGrams = (d) => r0(d.portion_grams || DISH_PORTION);
+const dishItem = (d) => ({ food_id: d.id, source: "recipe", name: d.name, kcal_100: d.kcal_100, protein_100: d.protein_100,
+  fat_100: d.fat_100, carbs_100: d.carbs_100, ...extrasOf(d), portion_grams: d.portion_grams, grams: dishGrams(d), options: [] });
+
+function dishRow(d, j) {
+  const n = d.ingredient_count;
+  return `<div class="recent">
+    <button class="recent-main" data-dish="${j}">
+      <span class="grow"><b>${esc(d.name)}</b>
+        <span class="small muted">порция ${dishGrams(d)} г · ${n} ${plural(n, "продукт", "продукта", "продуктов")}</span></span>
+      <span class="small"><b>${r0((d.kcal_100 * dishGrams(d)) / 100)}</b> ккал</span>
+    </button>
+    <button class="recent-edit" data-dish-edit="${j}" aria-label="Изменить блюдо «${esc(d.name)}»">${ICONS.pencil}</button>
+  </div>`;
+}
+
+async function loadDishes() {
+  try { myDishes = await api("/api/recipes"); } catch { myDishes = []; }
+  const box = $("#dishes");
+  if (!box || !myDishes.length) return;
+  box.innerHTML = `<h3 class="sub">Мои блюда <span class="muted">— тап открывает порцию</span></h3>`
+    + myDishes.slice(0, ADD_DISHES).map(dishRow).join("")
+    + (myDishes.length > ADD_DISHES ? `<button class="block ghost-line" id="dish-all">Все блюда · ${myDishes.length}</button>` : "");
+}
+
+async function openDishList() {
+  openSheet(`
+    <div class="row between"><h2>Мои блюда</h2><button class="ghost" id="dishes-back" aria-label="Назад">${ICONS.left}</button></div>
+    <div id="dish-list"><div class="skeleton"></div><div class="skeleton"></div></div>
+    <button class="primary block with-ico center-ico" id="dish-new" style="margin-top:14px">${ICONS.plus}Новое блюдо</button>`);
+  try { myDishes = await api("/api/recipes"); } catch (err) {
+    const box = $("#dish-list");
+    if (box) box.innerHTML = `<div class="error">${esc(err.message)}</div>`;
+    return;
+  }
+  const box = $("#dish-list");
+  if (!box) return;
+  box.innerHTML = myDishes.length ? myDishes.map(dishRow).join("")
+    : '<p class="muted small">Пока нет блюд. Сохрани суп, плов или запеканку один раз — дальше записывай порцию в одно касание.</p>';
+}
+
+// The dish at its usual portion in the meal editor: grams adjusted there, saved like any meal.
+const logDish = (d) => openEditor({ title: d.name, items: [dishItem(d)], comment: "" });
+
+function openDish(d, back) {
+  draft = null;
+  dish = { id: null, name: "", items: [], cooked_grams: null, portion_grams: null, note: "", photo: null, comment: "", error: "", ...d, back };
+  renderDish();
+}
+
+async function editDish(id, back) {
+  openSheet('<div class="spinner"></div>');
+  try {
+    const d = await api(`/api/recipes/${id}`);
+    openDish({ id: d.id, name: d.name, cooked_grams: d.cooked_grams, portion_grams: d.portion_grams,
+      items: d.items.map(({ id: _, ...i }) => ({ ...i, options: [] })) }, back);
+  } catch (err) {
+    if (err.status === 401) { closeSheet(); return renderAuth(); }
+    back ? back() : closeSheet();
+    toast(err.message);
+  }
+}
+
+// A meal of several parts becomes a dish: what was eaten is one portion of it.
+function saveAsDish() {
+  const back = draft;
+  const items = structuredClone(back.items.filter((i) => Number(i.grams) > 0));
+  const sum = r0(items.reduce((s, i) => s + Number(i.grams), 0));
+  openDish({ name: MEAL_TYPES.some(([n]) => n === back.title) ? "" : back.title || "", items, cooked_grams: sum, portion_grams: sum },
+    () => { dish = null; draft = back; renderEditor(); });
+}
+
+const rawGrams = (d) => d.items.reduce((s, i) => s + (Number(i.grams) || 0), 0);
+
+function dishPer100(d) {
+  const weight = Number(d.cooked_grams) || rawGrams(d);
+  if (!(weight > 0)) return null;
+  const t = totalsOf(d.items);
+  return { kcal: (t.kcal / weight) * 100, protein: (t.protein / weight) * 100, fat: (t.fat / weight) * 100, carbs: (t.carbs / weight) * 100 };
+}
+
+function updateDishResult() {
+  const box = $("#dish-result");
+  if (!box || !dish) return;
+  const v = dishPer100(dish);
+  const cooked = $("#dish-cooked");
+  if (cooked) cooked.placeholder = rawGrams(dish) ? `${r0(rawGrams(dish))} — сумма продуктов` : "";
+  if (!v) { box.innerHTML = '<span class="muted small">Добавь продукты — посчитаю блюдо</span>'; return; }
+  const portion = dishGrams(dish);
+  box.innerHTML = `<div><b>На 100 г: ${r0(v.kcal)} ккал</b> <span class="muted small">· Б ${r0(v.protein)} · Ж ${r0(v.fat)} · У ${r0(v.carbs)}</span></div>
+    <div class="small muted">Порция ${portion} г: <b class="ink">${r0((v.kcal * portion) / 100)} ккал</b>${dish.portion_grams ? "" : " (обычная порция не задана)"}</div>`;
+}
+
+function renderDish() {
+  const d = dish;
+  openSheet(`
+    <div class="row between"><h2>${d.id ? "Блюдо" : "Новое блюдо"}</h2>
+      <button class="ghost" id="dish-back" aria-label="${d.back ? "Назад" : "Закрыть"}">${d.back ? ICONS.left : ICONS.close}</button></div>
+    <input id="dish-name" value="${esc(d.name)}" placeholder="Название, например «Борщ»" aria-label="Название блюда" maxlength="200" autocomplete="off">
+    <details class="card dish-ai" ${d.items.length ? "" : "open"}>
+      <summary class="with-ico">${ICONS.sparkle}Собрать по описанию или фото</summary>
+      <textarea id="dish-note" placeholder="Опиши рецепт: продукты и сколько" maxlength="2000" aria-label="Опиши рецепт: продукты и сколько">${esc(d.note)}</textarea>
+      ${d.photo ? `<div class="row small dish-photo"><span class="li-ico">${ICONS.image}</span><span class="grow">Фото добавлено</span>
+        <button class="ghost" id="dish-photo-drop" aria-label="Убрать фото">${ICONS.close}</button></div>` : ""}
+      <div class="row voice-row">
+        <label class="btn icon-pick" aria-label="${d.photo ? "Заменить фото" : "Добавить фото ингредиентов или рецепта"}">${ICONS.camera}<input type="file" accept="image/*" data-dish-photo></label>
+        ${micButton("dish-note")}
+        <button class="primary grow" id="dish-ai">Собрать</button>
+      </div>
+      <div class="error" id="dish-error">${esc(d.error)}</div>
+    </details>
+    ${d.comment ? `<p class="small muted note">${ICONS.bulb}<span>${esc(d.comment)}</span></p>` : ""}
+    <h3 class="sub">Продукты <span class="muted">— сырые, на всё блюдо</span></h3>
+    <div class="card" id="items">${d.items.map(itemHtml).join("") || '<p class="muted small">Найди продукты ниже или собери их из описания</p>'}</div>
+    <div class="card">
+      <input id="food-q" placeholder="Добавить продукт: поиск (рус./англ.)" autocomplete="off" aria-label="Добавить продукт">
+      <div class="search-results" id="food-results"></div>
+    </div>
+    <div class="card">
+      <label for="dish-cooked" style="margin-top:0">Вес готового блюда, г</label>
+      <input id="dish-cooked" type="number" inputmode="numeric" min="1" value="${d.cooked_grams ? r0(d.cooked_grams) : ""}">
+      <p class="small muted" style="margin:6px 0 0">Взвесь кастрюлю с едой и вычти вес пустой. Пусто — считаю по сумме продуктов</p>
+      <label for="dish-portion">Обычная порция, г</label>
+      <input id="dish-portion" type="number" inputmode="numeric" min="1" value="${d.portion_grams ? r0(d.portion_grams) : ""}" placeholder="${DISH_PORTION}">
+    </div>
+    <div class="totals">
+      <div id="dish-result"></div>
+      <button class="primary block" id="dish-save" style="margin-top:8px">Сохранить блюдо</button>
+      ${d.id ? '<button class="block danger" id="dish-delete" style="margin-top:8px">Удалить блюдо</button>' : ""}
+    </div>`);
+  updateDishResult();
+}
+
+function dishBack() {
+  const back = dish?.back;
+  dish = null;
+  back ? back() : closeSheet();
+}
+
+async function buildDishWithAi() {
+  const mine = dish;
+  mine.note = $("#dish-note")?.value.trim() || "";
+  if (!mine.note && !mine.photo) { mine.error = "Опиши рецепт словами или добавь фото"; return renderDish(); }
+  if (mine.items.length && !confirm("Заменить продукты в списке собранными заново?")) return;
+  const form = new FormData();
+  if (mine.photo) form.append("photo", mine.photo, "recipe.jpg");
+  form.append("note", mine.note);
+  stopVoice(true);
+  sheetBody.innerHTML = '<div class="spinner"></div><p class="center muted">Собираю рецепт…</p>';
+  try {
+    const r = await api("/api/recipes/draft", { method: "POST", form });
+    if (state.me) state.me.spent_today = r.spent_today;
+    if (dish !== mine) return; // the sheet was closed meanwhile
+    if (!r.items.length) mine.error = r.comment || "Не нашёл в описании продуктов";
+    else {
+      Object.assign(mine, { items: r.items, comment: r.comment, error: "", photo: null });
+      if (!mine.name.trim()) mine.name = r.title;
+      if (r.cooked_grams) mine.cooked_grams = r.cooked_grams;
+    }
+  } catch (err) {
+    if (err.status === 401) { closeSheet(); return renderAuth(); }
+    if (dish !== mine) return;
+    mine.error = err.message;
+  }
+  renderDish();
+}
+
+async function saveDish(btn) {
+  const d = dish;
+  const items = d.items.filter((i) => Number(i.grams) > 0);
+  if (!d.name.trim()) { toast("Назови блюдо"); return $("#dish-name")?.focus(); }
+  if (!items.length) return toast("Добавь хотя бы один продукт");
+  const num = (v) => (Number(v) > 0 ? Number(v) : null);
+  const body = {
+    name: d.name.trim(), cooked_grams: num(d.cooked_grams), portion_grams: num(d.portion_grams),
+    items: items.map((i) => ({ name: i.name, grams: Number(i.grams), food_id: i.food_id ?? null, source: i.source,
+      kcal_100: i.kcal_100, protein_100: i.protein_100, fat_100: i.fat_100, carbs_100: i.carbs_100, ...extrasOf(i) })),
+  };
+  btn.disabled = true;
+  try {
+    await api(d.id ? `/api/recipes/${d.id}` : "/api/recipes", { method: d.id ? "PUT" : "POST", json: body });
+    toast(d.id ? "Блюдо сохранено" : "Блюдо сохранено — найдёшь его в «Мои блюда»");
+    dishBack();
+  } catch (err) { btn.disabled = false; toast(err.message); }
+}
+
+async function deleteDish(btn) {
+  if (!confirm("Удалить это блюдо? Уже записанные приёмы пищи останутся.")) return;
+  btn.disabled = true;
+  try { await api(`/api/recipes/${dish.id}`, { method: "DELETE" }); toast("Блюдо удалено"); dishBack(); }
+  catch (err) { btn.disabled = false; toast(err.message); }
+}
+
+sheetBody.addEventListener("input", (e) => {
+  if (!dish) return;
+  const id = e.target.id;
+  if (id === "dish-name") dish.name = e.target.value;
+  else if (id === "dish-note") dish.note = e.target.value;
+  else if (id === "dish-cooked" || id === "dish-portion") {
+    dish[id === "dish-cooked" ? "cooked_grams" : "portion_grams"] = Number(e.target.value) > 0 ? Number(e.target.value) : null;
+    updateDishResult();
+  }
+});
+
+sheetBody.addEventListener("click", (e) => {
+  if (!dish) return;
+  const t = e.target.closest("button");
+  if (!t) return;
+  if (t.id === "dish-back") dishBack();
+  else if (t.id === "dish-ai") buildDishWithAi();
+  else if (t.id === "dish-save") saveDish(t);
+  else if (t.id === "dish-delete") deleteDish(t);
+  else if (t.id === "dish-photo-drop") { dish.photo = null; renderDish(); }
+});
+
+// Opening a dish from the add sheet or the full list, and coming back to where it was opened.
+sheetBody.addEventListener("click", (e) => {
+  if (dish || draft) return;
+  const fromList = !!$("#dish-list");
+  const back = fromList ? openDishList : openAdd;
+  const row = e.target.closest("[data-dish]");
+  if (row) return logDish(myDishes[Number(row.dataset.dish)]);
+  const edit = e.target.closest("[data-dish-edit]");
+  if (edit) return editDish(myDishes[Number(edit.dataset.dishEdit)].id, back);
+  if (e.target.closest("#dish-all")) return openDishList();
+  if (e.target.closest("#dishes-back")) return openAdd();
+  if (e.target.closest("#dish-new")) return openDish({}, back);
+});
+
+// ---------- voice input ----------
+// The browser's own speech recognition, where there is one: nothing is recorded or sent by us.
+// Without it there is no button; the keyboard's dictation still works.
+
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let voiceDenied = false; // no microphone access: the buttons stay hidden for the session
+let voice = null; // { rec, btn, ta }
+
+const micButton = (targetId) => (SpeechRec && !voiceDenied
+  ? `<button type="button" class="mic" data-mic="${targetId}" aria-label="Диктовать" aria-pressed="false">${ICONS.mic}</button>` : "");
+
+function setMicState(btn, on) {
+  btn.classList.toggle("on", on);
+  btn.setAttribute("aria-pressed", String(on));
+  btn.setAttribute("aria-label", on ? "Остановить диктовку" : "Диктовать");
+}
+
+// abort drops what is still being recognized (the field is going away); stop keeps it.
+function stopVoice(abort = false) {
+  if (!voice) return;
+  const v = voice;
+  voice = null;
+  setMicState(v.btn, false);
+  try { abort ? v.rec.abort() : v.rec.stop(); } catch { /* already ended */ }
+}
+
+function startVoice(btn) {
+  const ta = document.getElementById(btn.dataset.mic);
+  if (!ta || ta.disabled) return;
+  const rec = new SpeechRec();
+  rec.lang = "ru-RU";
+  rec.interimResults = true;
+  rec.continuous = false;
+  // Appended to what is already typed; interim words show live and are replaced by the final ones.
+  const base = ta.value;
+  const sep = base && !/\s$/.test(base) ? " " : "";
+  const v = { rec, btn, ta };
+  rec.onresult = (e) => {
+    if (!ta.isConnected) return stopVoice(true);
+    const said = Array.from(e.results, (r) => r[0].transcript).join("").trim();
+    ta.value = base + (said ? sep + said : "");
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      voiceDenied = true;
+      document.querySelectorAll("[data-mic]").forEach((b) => b.remove());
+      toast("Нет доступа к микрофону");
+    } else if (e.error === "network") toast("Диктовка не работает без сети");
+    // no-speech, aborted: just stop
+  };
+  rec.onend = () => { if (voice === v) { voice = null; setMicState(btn, false); } };
+  try { rec.start(); } catch { return; }
+  voice = v;
+  setMicState(btn, true);
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-mic]");
+  if (!btn) return;
+  e.preventDefault();
+  if (voice?.btn === btn) return stopVoice();
+  stopVoice(true);
+  startVoice(btn);
+});
+document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "visible") stopVoice(true); });
 
 // ---------- barcode ----------
 
@@ -1587,6 +1928,7 @@ async function loadCoach() {
 }
 
 function renderCoach(pending = "") {
+  stopVoice(true);
   const c = state.coach;
   const left = Math.max(0, c.per_day - c.used_today);
   const bubbles = c.messages.map((m) => `<div class="bubble ${m.role}">${m.role === "assistant" ? coachHtml(m.text) : `<p>${esc(m.text)}</p>`}</div>`).join("");
@@ -1601,6 +1943,7 @@ function renderCoach(pending = "") {
     </div>
     <form class="composer" id="coach-form">
       <textarea id="coach-text" rows="1" placeholder="${left ? "Напиши коучу…" : "Продолжим завтра"}" ${left && !pending ? "" : "disabled"} maxlength="2000"></textarea>
+      ${left && !pending ? micButton("coach-text") : ""}
       <button class="primary" ${left && !pending ? "" : "disabled"} aria-label="Отправить">${ICONS.up}</button>
     </form>
     <div id="coach-error" class="error"></div>`;

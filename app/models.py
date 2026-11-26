@@ -39,7 +39,10 @@ class Invite(Base):
 
 
 class Food(Base):
-    """Nutrition per 100 g. source: usda | off (Open Food Facts) | custom."""
+    """Nutrition per 100 g. source: usda | off (Open Food Facts) | custom | recipe.
+
+    A recipe is a user's own dish: its per-100 g values are computed from recipe_items
+    (app.recipes) and, unlike custom foods, it is private to its owner."""
 
     __tablename__ = "foods"
 
@@ -59,6 +62,35 @@ class Food(Base):
     # Who added a custom or scanned food (shown first in their own search); None for USDA.
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     barcode: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    # Recipes only. cooked_grams: the finished dish (None = the sum of its ingredients);
+    # portion_grams: the usual helping, the default when logging it.
+    cooked_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
+    portion_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    recipe_items: Mapped[list["RecipeItem"]] = relationship(
+        foreign_keys="RecipeItem.food_id", cascade="all, delete-orphan", order_by="RecipeItem.id"
+    )
+
+
+class RecipeItem(Base):
+    """One raw ingredient of a recipe, shaped like MealItem: per-100 g values are copied in,
+    so the dish keeps its numbers if the ingredient's food changes or goes away."""
+
+    __tablename__ = "recipe_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    food_id: Mapped[int] = mapped_column(ForeignKey("foods.id", ondelete="CASCADE"), index=True)  # the dish
+    name: Mapped[str] = mapped_column(String(300))
+    grams: Mapped[float] = mapped_column(Float)
+    ingredient_food_id: Mapped[int | None] = mapped_column(ForeignKey("foods.id", ondelete="SET NULL"), nullable=True)
+    source: Mapped[str] = mapped_column(String(16))
+    kcal_100: Mapped[float] = mapped_column(Float)
+    protein_100: Mapped[float] = mapped_column(Float)
+    fat_100: Mapped[float] = mapped_column(Float)
+    carbs_100: Mapped[float] = mapped_column(Float)
+    fiber_100: Mapped[float | None] = mapped_column(Float, nullable=True)  # None = unknown
+    sugar_100: Mapped[float | None] = mapped_column(Float, nullable=True)
+    salt_100: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Meal(Base):
@@ -88,7 +120,7 @@ class MealItem(Base):
     name: Mapped[str] = mapped_column(String(300))
     grams: Mapped[float] = mapped_column(Float)
     food_id: Mapped[int | None] = mapped_column(ForeignKey("foods.id", ondelete="SET NULL"), nullable=True)
-    source: Mapped[str] = mapped_column(String(16))  # usda | off | custom | estimate
+    source: Mapped[str] = mapped_column(String(16))  # usda | off | custom | recipe | estimate | manual
     kcal_100: Mapped[float] = mapped_column(Float)
     protein_100: Mapped[float] = mapped_column(Float)
     fat_100: Mapped[float] = mapped_column(Float)

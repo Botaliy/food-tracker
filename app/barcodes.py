@@ -80,7 +80,8 @@ def from_off(product: dict, code: str, user: User) -> Food | None:
 
 
 def lookup(db: Session, code: str, user: User) -> Food | None:
-    known = db.scalar(select(Food).where(Food.barcode == code).order_by(Food.id.desc()).limit(1))
+    # Recipes never carry a barcode; the filter keeps it so if one ever does.
+    known = db.scalar(select(Food).where(Food.barcode == code, Food.source != "recipe").order_by(Food.id.desc()).limit(1))
     if known is not None:
         return known
     product = _fetch(code)
