@@ -10,12 +10,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, barcodes, corrections, diary, energy, foods, push, review as review_mod, usage
+from app import auth, barcodes, corrections, diary, energy, foods, insights, push, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
 from app.images import release_memory, shrink
-from app.models import Activity, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Weight, utcnow
+from app.models import Activity, Food, Invite, Meal, MealItem, Profile, PushSubscription, Review, User, Water, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
 logger = logging.getLogger(__name__)
@@ -341,6 +341,10 @@ RECENT_DAYS = 30
 
 @router.get("/meals/recent")
 def recent_meals(limit: int = Query(8, ge=1, le=20), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    return _recent(db, user, limit)
+
+
+def _recent(db: Session, user: User, limit: int) -> list[dict]:
     """Meals worth repeating: the same title and set of products counts as one, most frequent first."""
     since = utcnow() - timedelta(days=RECENT_DAYS)
     meals = db.scalars(
@@ -381,6 +385,10 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "activity": _activity_dict(act),
         "streaks": diary.streaks(db, user, _today(user)),
         "weight": _weight_outlook(db, user),
+        "water": _water(db, user, the_day),
+        "suggest": insights.suggestions(
+            user.kcal_goal - totals["kcal"], user.protein_goal - totals["protein"], _recent(db, user, 20)
+        ) if the_day == _today(user) and meals else [],
     }
 
 
@@ -395,6 +403,35 @@ def _weight_outlook(db: Session, user: User) -> dict | None:
     if out is not None:
         out["today"] = weights[-1].kg if weights[-1].day == today else None
     return out
+
+
+def _water(db: Session, user: User, d: date) -> dict | None:
+    profile = db.get(Profile, user.id)
+    if profile is not None and not profile.track_water:
+        return None
+    w = db.scalar(select(Water).where(Water.user_id == user.id, Water.day == d))
+    return {"ml": w.ml if w else 0, "goal": profile.water_goal_ml if profile else 2000}
+
+
+class WaterIn(BaseModel):
+    delta_ml: int = Field(ge=-1000, le=1000)
+
+
+@router.post("/water")
+def add_water(body: WaterIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    d = _today(user)
+    w = db.scalar(select(Water).where(Water.user_id == user.id, Water.day == d))
+    if w is None:
+        w = Water(user_id=user.id, day=d, ml=0)
+        db.add(w)
+    w.ml = max(0, min(10000, (w.ml or 0) + body.delta_ml))
+    db.commit()
+    return _water(db, user, d) or {"ml": w.ml}
+
+
+@router.get("/insights")
+def get_insights(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    return insights.observations(db, user, _today(user))
 
 
 def _activity_dict(a: Activity | None) -> dict | None:
@@ -588,6 +625,8 @@ def _profile_dict(db: Session, user: User, profile: Profile) -> dict:
         "activity": profile.activity,
         "rate_kg_week": profile.rate_kg_week,
         "goal_weight_kg": profile.goal_weight_kg,
+        "track_water": profile.track_water,
+        "water_goal_ml": profile.water_goal_ml,
         "weight_kg": last_weight.kg if last_weight else None,
         "activity_levels": [{"value": k, "label": v} for k, v in energy.ACTIVITY_LEVELS.items()],
         "rates": [{"value": k, "label": v} for k, v in energy.RATES.items()],
@@ -706,6 +745,19 @@ def receive_health(body: HealthIn, authorization: str = Header(""), db: Session 
 
 
 # ---------- push reminders ----------
+
+class WaterSettingsIn(BaseModel):
+    track_water: bool
+    water_goal_ml: int = Field(ge=500, le=5000)
+
+
+@router.put("/profile/water")
+def put_water_settings(body: WaterSettingsIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    profile = _profile(db, user)
+    profile.track_water, profile.water_goal_ml = body.track_water, body.water_goal_ml
+    db.commit()
+    return _profile_dict(db, user, profile)
+
 
 class NotifyIn(BaseModel):
     evening: bool

@@ -266,7 +266,9 @@ function renderDay() {
             <span>${n}</span><span class="muted small">из ${goal} г</span></div>`).join("")}
       </div>
     </div>
+    ${isToday ? suggestRow(state.dayData.suggest, g.kcal - t.kcal) : ""}
     ${isToday ? weightLine(state.dayData.weight) : ""}
+    ${isToday ? waterLine(state.dayData.water) : ""}
     ${isToday ? myStreaks(state.dayData.streaks) : ""}
     ${isToday ? streaksRow(state.streaks) : ""}
     ${meals.length
@@ -287,6 +289,38 @@ function weightLine(w) {
   return `<button class="card line-card" data-act="weigh">⚖️ <span class="grow"><b>${kgFmt(w.today ?? w.last.kg)} кг</b>
     <span class="muted small">тренд ${kgFmt(w.trend)}${pace}${goal}</span></span>
     <span class="pill">${w.today != null ? "✎" : "записать"}</span></button>`;
+}
+
+const GLASS_ML = 250;
+
+function waterLine(w) {
+  if (!w) return "";
+  const glasses = Math.round(w.ml / GLASS_ML), goal = Math.round(w.goal / GLASS_ML);
+  const cells = Array.from({ length: Math.max(goal, glasses) }, (_, i) => `<i class="${i < glasses ? "on" : ""}"></i>`).join("");
+  return `<div class="card water">
+    <div class="grow"><div>💧 <b>${kgFmt(w.ml / 1000)} л</b> <span class="muted small">из ${kgFmt(w.goal / 1000)} л</span></div>
+      <div class="glasses" aria-hidden="true">${cells}</div></div>
+    <button class="icon-btn" data-act="water-sub" aria-label="Убрать стакан" ${w.ml ? "" : "disabled"}>−</button>
+    <button class="icon-btn primary" data-act="water-add" aria-label="Добавить стакан воды">＋</button>
+  </div>`;
+}
+
+async function addWater(delta) {
+  try {
+    state.dayData.water = await api("/api/water", { method: "POST", json: { delta_ml: delta } });
+    const y = window.scrollY;
+    renderDay();
+    window.scrollTo(0, y);
+  } catch (err) { toast(err.message); }
+}
+
+function suggestRow(list, left) {
+  if (!list?.length) return "";
+  return `<div class="suggest">
+    <div class="small muted">Осталось ~${fmtInt(left)} ккал — подойдёт из твоего обычного:</div>
+    <div class="suggest-list">${list.map((m, j) => `<button class="chip" data-suggest="${j}">
+      ${esc(m.title || m.items.map((i) => i.name).join(", "))} <b>${r0(m.totals.kcal)}</b></button>`).join("")}</div>
+  </div>`;
 }
 
 function openWeigh() {
@@ -369,6 +403,8 @@ function mealCard(m) {
 app.addEventListener("click", (e) => {
   const act = e.target.closest("[data-act]")?.dataset.act;
   const mealEl = e.target.closest("[data-meal]");
+  const sug = e.target.closest("[data-suggest]");
+  if (sug) return repeatMeal(state.dayData.suggest[Number(sug.dataset.suggest)]);
   if (act === "prev" || act === "next") {
     const d = new Date(state.day + "T12:00");
     d.setDate(d.getDate() + (act === "prev" ? -1 : 1));
@@ -390,6 +426,10 @@ app.addEventListener("click", (e) => {
     loadDay();
   } else if (act === "weigh") {
     openWeigh();
+  } else if (act === "water-add") {
+    addWater(GLASS_ML);
+  } else if (act === "water-sub") {
+    addWater(-GLASS_ML);
   } else if (act === "apply-adaptive") {
     applyGoals(state.stats.energy.adaptive.suggested);
   } else if (act === "review") {
@@ -418,12 +458,14 @@ const plural = (n, one, few, many) => {
 async function loadStats() {
   state.view = "reports";
   try {
-    const [stats, review] = await Promise.all([
+    const [stats, review, found] = await Promise.all([
       api(`/api/stats?days=${state.statsDays}`),
       state.review ? Promise.resolve(state.review) : api("/api/review"),
+      api("/api/insights").catch(() => []),
     ]);
     state.stats = stats;
     state.review = review;
+    state.insights = found;
     renderStats();
   } catch (err) {
     if (err.status === 401) return renderAuth();
@@ -495,6 +537,7 @@ function renderStats() {
       <div class="tile"><span class="muted small">В норме</span><b>${s.in_goal_days}<small> / ${s.logged_days}</small></b><span class="muted small">дней с записями</span></div>
       <div class="tile"><span class="muted small">В среднем</span><b>${r0(a.kcal)}</b><span class="muted small">ккал/день</span></div>
     </div>
+    ${insightsCard(state.insights)}
     ${reviewCard()}
     <div class="card">
       <div class="row between"><b>Калории</b><span class="muted small">${s.logged_days ? `среднее ${r0(a.kcal)} из ${g.kcal}` : "нет записей"}</span></div>
@@ -551,6 +594,12 @@ function energyCard(s) {
     ${main}
     ${extra.length ? `<div class="energy-extra small muted">${extra.map((x) => `<div>${x}</div>`).join("")}</div>` : ""}
   </div>`;
+}
+
+function insightsCard(list) {
+  if (!list?.length) return "";
+  return `<div class="card"><b>Наблюдения за 2 недели</b>
+    <ul class="insights">${list.map((i) => `<li><span>${i.icon}</span><span>${esc(i.text)}</span></li>`).join("")}</ul></div>`;
 }
 
 function reviewCard() {
@@ -1084,6 +1133,7 @@ async function loadProfileView() {
       <button class="primary block" style="margin-top:12px">Сохранить</button>
     </form>
     <div class="card" id="profile-card"><div class="spinner"></div></div>
+    <div class="card" id="water-card"></div>
     <div class="card" id="notify-card"></div>
     <div class="card" id="health-card"></div>
     <div class="card small">
@@ -1222,6 +1272,22 @@ function renderProfile(p) {
   if (f) $("#apply-formula").onclick = () => applyGoals(f.suggested);
   renderHealth(p.health);
   renderNotify(p.notify);
+  renderWaterSettings(p);
+}
+
+function renderWaterSettings(p) {
+  const box = $("#water-card");
+  if (!box) return;
+  const goals = [1500, 2000, 2500, 3000].map((ml) => `<option value="${ml}" ${ml === p.water_goal_ml ? "selected" : ""}>${kgFmt(ml / 1000)} л</option>`).join("");
+  box.innerHTML = `<b>💧 Вода</b>
+    <form id="water-form" class="toggles">
+      <label class="check"><input type="checkbox" name="track" ${p.track_water ? "checked" : ""}> Считать стаканы на экране дня, цель <select name="goal">${goals}</select></label>
+    </form>`;
+  $("#water-form").onchange = async (e) => {
+    const f = e.currentTarget;
+    try { await api("/api/profile/water", { method: "PUT", json: { track_water: f.track.checked, water_goal_ml: +f.goal.value } }); toast("Сохранено"); }
+    catch (err) { toast(err.message); }
+  };
 }
 
 function renderHealth(h, token = null) {

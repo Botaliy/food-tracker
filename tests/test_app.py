@@ -731,3 +731,36 @@ def test_day_has_weight_outlook(client):
     w = client.get("/api/day").json()["weight"]
     assert w["today"] == 64.0 and w["goal"] == 60 and w["kg_per_week"] == -0.5 and w["eta"]
     assert client.get("/api/profile").json()["goal_weight_kg"] == 60
+
+
+def test_observations_from_two_weeks(client):
+    from datetime import timedelta
+    today = _local_today()
+    for k in range(1, 8):
+        d = today - timedelta(days=k)
+        client.post("/api/meals", json={"eaten_at": f"{d}T08:00:00", "items": [
+            {"name": "Тост", "grams": 100, "kcal_100": 300, "protein_100": 8, "fat_100": 5, "carbs_100": 50}]})
+        client.post("/api/meals", json={"eaten_at": f"{d}T20:00:00", "items": [
+            {"name": "Пицца", "grams": 400, "kcal_100": 260, "protein_100": 11, "fat_100": 10, "carbs_100": 30}]})
+    found = client.get("/api/insights").json()
+    icons = [f["icon"] for f in found]
+    assert "🌙" in icons and "🍳" in icons and "🔎" in icons
+    assert "«Пицца»" in found[icons.index("🔎")]["text"]
+
+
+def test_suggestions_fit_what_is_left():
+    from app import insights
+    meal = lambda t, k, p: {"title": t, "totals": {"kcal": k, "protein": p}}  # noqa: E731
+    usual = [meal("Пицца", 900, 30), meal("Творог", 300, 35), meal("Яблоко", 80, 0), meal("Омлет", 350, 20)]
+    picks = [m["title"] for m in insights.suggestions(400, 40, usual)]
+    assert picks[0] == "Творог" and "Пицца" not in picks
+    assert insights.suggestions(100, 10, usual) == []
+
+
+def test_water_glasses_and_switch(client):
+    assert client.get("/api/day").json()["water"] == {"ml": 0, "goal": 2000}
+    client.post("/api/water", json={"delta_ml": 250})
+    assert client.post("/api/water", json={"delta_ml": 250}).json()["ml"] == 500
+    assert client.post("/api/water", json={"delta_ml": -1000}).json()["ml"] == 0
+    client.put("/api/profile/water", json={"track_water": False, "water_goal_ml": 2500})
+    assert client.get("/api/day").json()["water"] is None

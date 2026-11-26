@@ -125,6 +125,8 @@ class Profile(Base):
     weekly_review_push: Mapped[bool] = mapped_column(Boolean, default=True)
     share_streak: Mapped[bool] = mapped_column(Boolean, default=False)  # shown to the others who share theirs
     onboarded: Mapped[bool] = mapped_column(Boolean, default=False)  # went through (or skipped) the first-run steps
+    track_water: Mapped[bool] = mapped_column(Boolean, default=True)
+    water_goal_ml: Mapped[int] = mapped_column(Integer, default=2000)
     last_evening_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
     last_weekly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
 
@@ -154,6 +156,18 @@ class Activity(Base):
     active_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
     steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class Water(Base):
+    """Water drunk on a local day, in ml."""
+
+    __tablename__ = "water"
+    __table_args__ = (UniqueConstraint("user_id", "day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date_] = mapped_column(Date)
+    ml: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Review(Base):

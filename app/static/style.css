@@ -327,3 +327,16 @@ button.line-card { display: flex; align-items: center; gap: 10px; width: 100%; t
 button.line-card .grow > * { display: block; }
 .pill { padding: 4px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; }
 .chart.weight circle { opacity: .55; }
+
+/* water, suggestions, observations */
+.card.water { display: flex; align-items: center; gap: 8px; padding: 12px 14px; }
+.glasses { display: flex; gap: 3px; margin-top: 6px; flex-wrap: wrap; }
+.glasses i { width: 14px; height: 18px; border-radius: 3px 3px 5px 5px; background: var(--track); }
+.glasses i.on { background: #38bdf8; }
+.icon-btn { width: 44px; height: 44px; padding: 0; border-radius: 50%; font-size: 22px; flex: none; }
+.icon-btn.primary { background: #0ea5e9; border-color: #0ea5e9; color: #fff; }
+.suggest { margin: 4px 2px 12px; }
+.suggest-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.suggest-list .chip { cursor: pointer; font: inherit; font-size: 14px; color: var(--text); }
+ul.insights { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 10px; }
+ul.insights li { display: flex; gap: 10px; font-size: 15px; }
