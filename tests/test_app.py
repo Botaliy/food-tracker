@@ -301,6 +301,84 @@ def test_review_respects_daily_limit(client, db, fake_reviewer):
     assert fake_reviewer.calls == 0
 
 
+# ---------- goals, Apple Health, energy ----------
+
+def test_formula_and_goals():
+    from app import energy
+    # 30-year-old woman, 165 cm, 65 kg: 10*65 + 6.25*165 - 5*30 - 161 = 1370.25
+    assert energy.bmr("f", 65, 165, 30) == pytest.approx(1370.25)
+    g = energy.goals_for(2000, "f", 65, -0.5)
+    assert g["kcal"] == 1450 and g["protein"] == 130 and not g["capped"]
+    assert g["protein"] * 4 + g["fat"] * 9 + g["carbs"] * 4 == pytest.approx(g["kcal"], abs=10)
+    # Too steep a deficit is held at the safe floor.
+    assert energy.goals_for(1500, "f", 55, -0.75)["kcal"] == 1200
+    assert energy.goals_for(1500, "f", 55, -0.75)["capped"]
+
+
+def test_adaptive_expenditure():
+    from datetime import date, timedelta
+    from app import energy
+    d0 = date(2026, 11, 1)
+    days = [energy.DayIntake(d0 + timedelta(days=k), 2000, k % 7 != 6) for k in range(28)]
+    # Losing exactly 0.5 kg a week on 2000 kcal: spends 2000 + 550 = 2550.
+    weights = [(d0 + timedelta(days=k), 80 - 0.5 * k / 7) for k in range(0, 28, 3)]
+    out = energy.adaptive(days, weights)
+    assert out["ready"] and out["tdee"] == 2550 and out["kg_per_week"] == -0.5
+    assert not energy.adaptive(days[:5], weights)["ready"]
+    assert not energy.adaptive(days, weights[:1])["ready"]
+
+
+def test_profile_gives_formula_goals(client):
+    p = client.get("/api/profile").json()
+    assert p["formula"] is None and p["health"] == {"connected": False, "last_day": None}
+    r = client.put("/api/profile", json={"sex": "m", "birth_year": 1990, "height_cm": 180, "weight_kg": 85,
+                                         "activity": 1.55, "rate_kg_week": -0.5})
+    assert r.status_code == 200, r.text
+    f = r.json()["formula"]
+    assert f["tdee"] > f["bmr"] > 1500 and f["suggested"]["kcal"] < f["tdee"]
+    assert client.get("/api/stats").json()["last_weight"]["kg"] == 85  # the form's weight is a weigh-in
+    bad = client.put("/api/profile", json={"sex": "m", "birth_year": 1990, "height_cm": 180, "activity": 3, "rate_kg_week": 0})
+    assert bad.status_code == 400
+
+
+def test_health_shortcut_sends_activity(client, db):
+    from datetime import timedelta
+    today = _local_today()
+    token = client.post("/api/profile/health-token").json()["token"]
+    anon = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(client.app)
+
+    assert anon.post("/api/health", json={"steps": 100}).status_code == 401
+    assert anon.post("/api/health", json={"steps": 100}, headers={"Authorization": "Bearer nope"}).status_code == 401
+    h = {"Authorization": f"Bearer {token}"}
+    assert anon.post("/api/health", json={"active_kcal": 512.37, "steps": 8400}, headers=h).json() == {"ok": True, "date": today.isoformat()}
+    anon.post("/api/health", json={"steps": 9100}, headers=h)  # a later resend keeps the kcal
+    assert client.get("/api/day").json()["activity"] == {"active_kcal": 512.4, "steps": 9100}
+    old = (today - timedelta(days=40)).isoformat()
+    assert anon.post("/api/health", json={"date": old, "steps": 1}, headers=h).status_code == 400
+
+    s = client.get("/api/stats").json()
+    assert s["days"][-1]["steps"] == 9100 and s["energy"]["activity"]["days"] == 1
+    assert client.get("/api/profile").json()["health"] == {"connected": True, "last_day": today.isoformat()}
+
+    # A new key replaces the old one.
+    client.post("/api/profile/health-token")
+    assert anon.post("/api/health", json={"steps": 1}, headers=h).status_code == 401
+
+
+def test_stats_adaptive_needs_data_then_suggests(client):
+    from datetime import timedelta
+    today = _local_today()
+    s = client.get("/api/stats").json()["energy"]["adaptive"]
+    assert not s["ready"] and s["logged_days"] == 0
+    for k in range(1, 15):
+        _eat(client, f"{today - timedelta(days=k)}T12:00:00", 500, grams=400)  # 2000 kcal a day
+    for k in (14, 7, 1):
+        client.put("/api/weight", json={"kg": 80 - (14 - k) / 14, "date": (today - timedelta(days=k)).isoformat()})
+    ad = client.get("/api/stats").json()["energy"]["adaptive"]
+    assert ad["ready"] and ad["avg_intake"] == 2000
+    assert ad["tdee"] == 2550 and ad["suggested"]["kcal"] == 2550  # no profile: keep weight
+
+
 # ---------- invites ----------
 
 def test_invite_flow(client):

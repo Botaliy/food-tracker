@@ -1,18 +1,20 @@
+import hashlib
 import json
+import secrets
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app import auth, foods, review as review_mod, usage
+from app import auth, energy, foods, review as review_mod, usage
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft
 from app.images import release_memory, shrink
-from app.models import Food, Invite, Meal, MealItem, Review, User, Weight, utcnow
+from app.models import Activity, Food, Invite, Meal, MealItem, Profile, Review, User, Weight, utcnow
 from app.recognize import RecognizeError, RecognizeErrorWithResponse, recognize
 
 router = APIRouter(prefix="/api")
@@ -326,12 +328,19 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
     ).all()
     out = [_meal_dict(m, user.timezone) for m in meals]
     totals = _totals([i for m in meals for i in m.items])
+    the_day = date_ or datetime.now(ZoneInfo(user.timezone)).date()
+    act = db.scalar(select(Activity).where(Activity.user_id == user.id, Activity.day == the_day))
     return {
-        "date": (date_ or datetime.now(ZoneInfo(user.timezone)).date()).isoformat(),
+        "date": the_day.isoformat(),
         "meals": out,
         "totals": totals,
         "goals": _me(db, user)["goals"],
+        "activity": _activity_dict(act),
     }
+
+
+def _activity_dict(a: Activity | None) -> dict | None:
+    return None if a is None else {"active_kcal": a.active_kcal, "steps": a.steps}
 
 
 # ---------- reports ----------
@@ -363,34 +372,87 @@ def _streak(db: Session, user: User, today: date) -> int:
     return n
 
 
-@router.get("/stats")
-def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
-    today = _today(user)
-    first = today - timedelta(days=days - 1)
+def _daily_rows(db: Session, user: User, first: date, last: date) -> list[dict]:
+    """Totals for every local day from first to last, empty days included."""
     start, _ = usage.day_bounds_utc(user.timezone, first)
-    _, end = usage.day_bounds_utc(user.timezone, today)
+    _, end = usage.day_bounds_utc(user.timezone, last)
     meals = db.scalars(
         select(Meal)
         .where(Meal.user_id == user.id, Meal.eaten_at >= start, Meal.eaten_at < end)
         .options(selectinload(Meal.items))
     ).all()
-
     by_day: dict[date, list[Meal]] = {}
     for m in meals:
         by_day.setdefault(_local_day(m.eaten_at, user.timezone), []).append(m)
-
+    acts = {a.day: a for a in db.scalars(
+        select(Activity).where(Activity.user_id == user.id, Activity.day >= first, Activity.day <= last))}
     rows = []
-    for k in range(days):
+    for k in range((last - first).days + 1):
         d = first + timedelta(days=k)
         day_meals = by_day.get(d, [])
-        rows.append({"date": d.isoformat(), "meals": len(day_meals), **_totals([i for m in day_meals for i in m.items])})
+        a = acts.get(d)
+        rows.append({
+            "date": d.isoformat(), "meals": len(day_meals), **_totals([i for m in day_meals for i in m.items]),
+            "active_kcal": a.active_kcal if a else None, "steps": a.steps if a else None,
+        })
+    return rows
 
+
+def _weights(db: Session, user: User, first: date, last: date) -> list[Weight]:
+    return list(db.scalars(
+        select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= last).order_by(Weight.day)
+    ))
+
+
+def _avg(values) -> float | None:
+    values = [v for v in values if v is not None]
+    return round(sum(values) / len(values)) if values else None
+
+
+def _energy(db: Session, user: User, today: date, rows: list[dict]) -> dict:
+    """The formula's estimate, the diary's estimate, and how much the watch says you move."""
+    window_first = today - timedelta(days=energy.ADAPTIVE_WINDOW_DAYS - 1)
+    window = _daily_rows(db, user, window_first, today)
+    weights = _weights(db, user, window_first, today)
+    # Today is still being eaten: leave it out of the average intake.
+    intake = [energy.DayIntake(date.fromisoformat(r["date"]), r["kcal"], r["meals"] > 0)
+              for r in window if r["date"] != today.isoformat()]
+    adaptive = energy.adaptive(intake, [(w.day, w.kg) for w in weights])
+
+    profile = db.get(Profile, user.id)
+    last_weight = db.scalar(select(Weight).where(Weight.user_id == user.id).order_by(Weight.day.desc()).limit(1))
+    sex = profile.sex if profile and profile.sex else "f"
+    rate = profile.rate_kg_week if profile else 0.0
+    if adaptive["ready"] and last_weight:
+        adaptive["suggested"] = energy.goals_for(adaptive["tdee"], sex, last_weight.kg, rate)
+    with_activity = [r for r in rows if r["active_kcal"] is not None or r["steps"] is not None]
+    return {
+        "adaptive": adaptive,
+        "formula": _formula(profile, last_weight, today),
+        "activity": {
+            "days": len(with_activity),
+            "active_kcal": _avg(r["active_kcal"] for r in with_activity),
+            "steps": _avg(r["steps"] for r in with_activity),
+        } if with_activity else None,
+    }
+
+
+def _formula(profile: Profile | None, last_weight: Weight | None, today: date) -> dict | None:
+    if not (profile and profile.sex and profile.birth_year and profile.height_cm and last_weight):
+        return None
+    f = energy.formula(profile.sex, last_weight.kg, profile.height_cm, today.year - profile.birth_year, profile.activity)
+    return {**f, "suggested": energy.goals_for(f["tdee"], profile.sex, last_weight.kg, profile.rate_kg_week)}
+
+
+@router.get("/stats")
+def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    today = _today(user)
+    first = today - timedelta(days=days - 1)
+    rows = _daily_rows(db, user, first, today)
     logged = [r for r in rows if r["meals"]]
     avg = {key: round(sum(r[key] for r in logged) / len(logged), 1) if logged else 0.0
            for key in ("kcal", "protein", "fat", "carbs")}
-    weights = db.scalars(
-        select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= today).order_by(Weight.day)
-    ).all()
+    weights = _weights(db, user, first, today)
     last_weight = db.scalar(select(Weight).where(Weight.user_id == user.id).order_by(Weight.day.desc()).limit(1))
     return {
         "from": first.isoformat(),
@@ -403,6 +465,7 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
         "streak": _streak(db, user, today),
         "weights": [{"date": w.day.isoformat(), "kg": w.kg} for w in weights],
         "last_weight": {"date": last_weight.day.isoformat(), "kg": last_weight.kg} if last_weight else None,
+        "energy": _energy(db, user, today, rows),
     }
 
 
@@ -472,7 +535,10 @@ def make_review(user: User = Depends(auth.current_user), db: Session = Depends(g
     weights = db.scalars(
         select(Weight).where(Weight.user_id == user.id, Weight.day >= first, Weight.day <= today).order_by(Weight.day)
     ).all()
-    digest = review_mod.build_digest(meals, weights, _me(db, user)["goals"], user.timezone, today)
+    activity = db.scalars(
+        select(Activity).where(Activity.user_id == user.id, Activity.day >= first, Activity.day <= today)
+    ).all()
+    digest = review_mod.build_digest(meals, weights, _me(db, user)["goals"], user.timezone, today, activity)
     if review_mod.logged_days(digest) < review_mod.MIN_LOGGED_DAYS:
         raise HTTPException(status_code=400, detail=f"Для обзора нужны записи хотя бы за {review_mod.MIN_LOGGED_DAYS} дня из последних 7")
     if problem := usage.limit_problem(db, user):
@@ -492,3 +558,127 @@ def make_review(user: User = Depends(auth.current_user), db: Session = Depends(g
     db.add(saved)
     db.commit()
     return {"review": _review_dict(saved), "fresh": True}
+
+
+# ---------- profile & goal calculator ----------
+
+def _profile(db: Session, user: User) -> Profile:
+    profile = db.get(Profile, user.id)
+    if profile is None:
+        profile = Profile(user_id=user.id, activity=1.375, rate_kg_week=0.0)
+        db.add(profile)
+        db.flush()
+    return profile
+
+
+def _profile_dict(db: Session, user: User, profile: Profile) -> dict:
+    today = _today(user)
+    last_weight = db.scalar(select(Weight).where(Weight.user_id == user.id).order_by(Weight.day.desc()).limit(1))
+    last_activity = db.scalar(select(Activity.day).where(Activity.user_id == user.id).order_by(Activity.day.desc()).limit(1))
+    return {
+        "sex": profile.sex,
+        "birth_year": profile.birth_year,
+        "height_cm": profile.height_cm,
+        "activity": profile.activity,
+        "rate_kg_week": profile.rate_kg_week,
+        "weight_kg": last_weight.kg if last_weight else None,
+        "activity_levels": [{"value": k, "label": v} for k, v in energy.ACTIVITY_LEVELS.items()],
+        "rates": [{"value": k, "label": v} for k, v in energy.RATES.items()],
+        "formula": _formula(profile, last_weight, today),
+        "health": {"connected": profile.health_token_hash is not None,
+                   "last_day": last_activity.isoformat() if last_activity else None},
+    }
+
+
+class ProfileIn(BaseModel):
+    sex: str = Field(pattern="^[mf]$")
+    birth_year: int = Field(ge=1920, le=2015)
+    height_cm: float = Field(ge=120, le=230)
+    activity: float
+    rate_kg_week: float
+    weight_kg: float | None = Field(None, ge=20, le=400)  # recorded as today's weigh-in when given
+
+
+@router.get("/profile")
+def get_profile(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    profile = _profile(db, user)
+    db.commit()
+    return _profile_dict(db, user, profile)
+
+
+@router.put("/profile")
+def put_profile(body: ProfileIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    if body.activity not in energy.ACTIVITY_LEVELS or body.rate_kg_week not in energy.RATES:
+        raise HTTPException(status_code=400, detail="Выбери активность и цель из списка")
+    profile = _profile(db, user)
+    profile.sex, profile.birth_year, profile.height_cm = body.sex, body.birth_year, body.height_cm
+    profile.activity, profile.rate_kg_week = body.activity, body.rate_kg_week
+    if body.weight_kg is not None:
+        _upsert_weight(db, user, _today(user), body.weight_kg)
+    db.commit()
+    return _profile_dict(db, user, profile)
+
+
+def _upsert_weight(db: Session, user: User, d: date, kg: float) -> None:
+    w = db.scalar(select(Weight).where(Weight.user_id == user.id, Weight.day == d))
+    if w is None:
+        db.add(Weight(user_id=user.id, day=d, kg=kg))
+    else:
+        w.kg = kg
+
+
+# ---------- Apple Health via an iPhone Shortcut ----------
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+@router.post("/profile/health-token")
+def new_health_token(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """A new key for the Shortcut; the old one stops working. Shown once."""
+    token = "ft_" + secrets.token_urlsafe(24)
+    _profile(db, user).health_token_hash = _token_hash(token)
+    db.commit()
+    return {"token": token}
+
+
+@router.delete("/profile/health-token")
+def drop_health_token(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    _profile(db, user).health_token_hash = None
+    db.commit()
+    return {"ok": True}
+
+
+class HealthIn(BaseModel):
+    day: date | None = Field(None, alias="date")
+    active_kcal: float | None = Field(None, ge=0, le=10000)
+    steps: int | None = Field(None, ge=0, le=200000)
+    weight_kg: float | None = Field(None, ge=20, le=400)
+
+
+@router.post("/health")
+def receive_health(body: HealthIn, authorization: str = Header(""), db: Session = Depends(get_db)):
+    """Called by the Shortcut, not the app: the key in the header stands in for the session."""
+    token = authorization.removeprefix("Bearer ").strip()
+    profile = db.scalar(select(Profile).where(Profile.health_token_hash == _token_hash(token))) if token else None
+    if profile is None:
+        raise HTTPException(status_code=401, detail="Неверный ключ")
+    user = db.get(User, profile.user_id)
+    today = _today(user)
+    d = body.day or today
+    if d > today or d < today - timedelta(days=30):
+        raise HTTPException(status_code=400, detail="Дата должна быть за последние 30 дней")
+    if body.active_kcal is not None or body.steps is not None:
+        a = db.scalar(select(Activity).where(Activity.user_id == user.id, Activity.day == d))
+        if a is None:
+            a = Activity(user_id=user.id, day=d)
+            db.add(a)
+        # A field the Shortcut didn't send keeps what was there.
+        if body.active_kcal is not None:
+            a.active_kcal = round(body.active_kcal, 1)
+        if body.steps is not None:
+            a.steps = body.steps
+    if body.weight_kg is not None:
+        _upsert_weight(db, user, d, round(body.weight_kg, 1))
+    db.commit()
+    return {"ok": True, "date": d.isoformat()}

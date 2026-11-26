@@ -209,6 +209,7 @@ function renderDay() {
         <div class="sum-stats">
           <div><span class="muted small">Съедено</span><b>${r0(t.kcal)} <small>ккал</small></b></div>
           <div><span class="muted small">Норма</span><b>${g.kcal} <small>ккал</small></b></div>
+          ${activityLine(state.dayData.activity)}
         </div>
       </div>
       <div class="macros">
@@ -223,7 +224,15 @@ function renderDay() {
           <p>Нажми «+» внизу и сфотографируй еду — посчитаю калории и БЖУ.</p></div>`}`;
 }
 
-const PART_OF_DAY = [[5, "🌙", "Перекус"], [11, "🍳", "Завтрак"], [16, "🍲", "Обед"], [22, "🍽️", "Ужин"], [24, "🌙", "Перекус"]];
+const fmtInt = (n) => r0(n).toLocaleString("ru-RU");
+
+function activityLine(a) {
+  if (!a || (a.active_kcal == null && a.steps == null)) return "";
+  const parts = [a.active_kcal != null ? `🔥 ${fmtInt(a.active_kcal)} ккал` : "", a.steps != null ? `👣 ${fmtInt(a.steps)}` : ""].filter(Boolean);
+  return `<div class="move"><span class="muted small">Движение</span><span>${parts.join(" · ")}</span></div>`;
+}
+
+const PART_OF_DAY =[[5, "🌙", "Перекус"], [11, "🍳", "Завтрак"], [16, "🍲", "Обед"], [22, "🍽️", "Ужин"], [24, "🌙", "Перекус"]];
 
 function mealCard(m) {
   const at = new Date(m.eaten_at);
@@ -261,6 +270,8 @@ app.addEventListener("click", (e) => {
   } else if (act === "open-day") {
     state.day = state.selected;
     loadDay();
+  } else if (act === "apply-adaptive") {
+    applyGoals(state.stats.energy.adaptive.suggested);
   } else if (act === "review") {
     makeReview();
   } else if (act === "save-weight") {
@@ -372,6 +383,7 @@ function renderStats() {
         ? `<span><b>${esc(dayLabel(sel.date))}</b>: ${r0(sel.kcal)} ккал · Б ${r0(sel.protein)} Ж ${r0(sel.fat)} У ${r0(sel.carbs)}</span><button class="ghost" data-act="open-day">Открыть ›</button>`
         : '<span class="muted">Нажми на столбик, чтобы увидеть день</span>'}</div>
     </div>
+    ${energyCard(s)}
     <div class="card">
       <b>БЖУ в среднем за день</b>
       <div class="macros">
@@ -389,6 +401,34 @@ function renderStats() {
       </form>
     </div>`;
   $("#weight-form").onsubmit = (e) => { e.preventDefault(); saveWeight(); };
+}
+
+function energyCard(s) {
+  const e = s.energy, ad = e.adaptive, g = s.goals;
+  let main;
+  if (ad.ready) {
+    const kgw = ad.kg_per_week;
+    const sug = ad.suggested;
+    const differs = sug && Math.abs(sug.kcal - g.kcal) >= 50;
+    main = `<div class="energy-big"><b>~${fmtInt(ad.tdee)}</b> <span class="muted">ккал в день</span></div>
+      <p class="small muted" style="margin:2px 0 0">Ты ел в среднем ${fmtInt(ad.avg_intake)} ккал, вес ${kgw > 0 ? "+" : kgw < 0 ? "−" : ""}${String(Math.abs(kgw)).replace(".", ",")} кг в неделю — значит, тратишь примерно столько.</p>
+      ${differs ? `<div class="calc"><div class="small muted">Норма под твою цель по этому расходу:</div><div>${goalsLine(sug)}</div>
+        <button class="block" data-act="apply-adaptive" style="margin-top:8px">Обновить норму</button></div>` : ""}`;
+  } else {
+    const pct = (have, need) => Math.min(100, Math.round((100 * have) / need));
+    main = `<p class="small muted" style="margin:4px 0 8px">Посчитаю твой реальный расход по дневнику и весу, когда наберётся данных за последние 4 недели:</p>
+      <div class="need"><span>Дни с записями</span><span>${ad.logged_days} из ${ad.need_logged_days}</span></div>${bar(pct(ad.logged_days, ad.need_logged_days), 100)}
+      <div class="need"><span>Взвешивания: разброс дат</span><span>${ad.weigh_in_span_days} из ${ad.need_span_days} дн.</span></div>${bar(pct(ad.weigh_in_span_days, ad.need_span_days), 100)}`;
+  }
+  const extra = [
+    e.formula ? `По формуле: ~${fmtInt(e.formula.tdee)} ккал` : "",
+    e.activity ? `Часы: ${e.activity.active_kcal != null ? `🔥 ${fmtInt(e.activity.active_kcal)} ккал` : ""}${e.activity.active_kcal != null && e.activity.steps != null ? " · " : ""}${e.activity.steps != null ? `👣 ${fmtInt(e.activity.steps)} шагов` : ""} в среднем за ${e.activity.days} ${plural(e.activity.days, "день", "дня", "дней")}` : "",
+  ].filter(Boolean);
+  return `<div class="card">
+    <b>Расход энергии</b>
+    ${main}
+    ${extra.length ? `<div class="energy-extra small muted">${extra.map((x) => `<div>${x}</div>`).join("")}</div>` : ""}
+  </div>`;
 }
 
 function reviewCard() {
@@ -720,6 +760,8 @@ async function openSettings() {
       <div class="grow"><label>Углеводы, г</label><input name="carbs" type="number" value="${g.carbs}"></div></div>
       <button class="primary block" style="margin-top:12px">Сохранить</button>
     </form>
+    <div class="card" id="profile-card"><div class="spinner"></div></div>
+    <div class="card" id="health-card"></div>
     <div class="card small">
       <div>Вы вошли как <b>${esc(me.username)}</b></div>
       <div class="muted">Распознавания сегодня: $${me.spent_today.toFixed(2)} из $${me.daily_limit.toFixed(2)}</div>
@@ -736,6 +778,105 @@ async function openSettings() {
   };
   $("#logout").onclick = async () => { await api("/api/auth/logout", { method: "POST" }); state.me = null; closeSheet(); renderAuth(); };
   if (me.is_admin) renderAdmin();
+  loadProfile();
+}
+
+// ---------- profile: goal calculator & Apple Health ----------
+
+const goalsLine = (s) => `<b>${s.kcal} ккал</b> · Б ${s.protein} · Ж ${s.fat} · У ${s.carbs}`;
+
+async function applyGoals(s) {
+  try {
+    state.me = await api("/api/me", { method: "PUT", json: { kcal: s.kcal, protein: s.protein, fat: s.fat, carbs: s.carbs, timezone: TZ } });
+    closeSheet(); toast("Норма обновлена");
+    state.view === "reports" ? loadStats() : loadDay();
+  } catch (err) { toast(err.message); }
+}
+
+async function loadProfile() {
+  try { renderProfile(await api("/api/profile")); }
+  catch (err) { const b = $("#profile-card"); if (b) b.innerHTML = `<div class="error">${esc(err.message)}</div>`; }
+}
+
+function renderProfile(p) {
+  const box = $("#profile-card");
+  if (!box) return;
+  const opt = (list, cur) => list.map((o) => `<option value="${o.value}" ${o.value === cur ? "selected" : ""}>${esc(o.label)}</option>`).join("");
+  const f = p.formula;
+  box.innerHTML = `
+    <b>Рассчитать норму</b>
+    <p class="muted small" style="margin:4px 0 0">По формуле Миффлина — Сан Жеора. Потом её уточнит твой дневник: см. «Расход энергии» в отчётах.</p>
+    <form id="profile-form">
+      <div class="row">
+        <div class="grow"><label>Пол</label><select name="sex"><option value="f" ${p.sex === "f" ? "selected" : ""}>Женский</option><option value="m" ${p.sex === "m" ? "selected" : ""}>Мужской</option></select></div>
+        <div class="grow"><label>Год рождения</label><input name="birth_year" type="number" inputmode="numeric" value="${p.birth_year ?? ""}" required></div>
+      </div>
+      <div class="row">
+        <div class="grow"><label>Рост, см</label><input name="height_cm" type="number" inputmode="decimal" value="${p.height_cm ?? ""}" required></div>
+        <div class="grow"><label>Вес, кг</label><input name="weight_kg" type="number" step="0.1" inputmode="decimal" value="${p.weight_kg ?? ""}" required></div>
+      </div>
+      <label>Активность</label><select name="activity">${opt(p.activity_levels, p.activity)}</select>
+      <label>Цель</label><select name="rate_kg_week">${opt(p.rates, p.rate_kg_week)}</select>
+      <button class="block" style="margin-top:12px">Рассчитать</button>
+    </form>
+    ${f ? `<div class="calc">
+      <div class="small muted">Базовый обмен ~${f.bmr} ккал, расход с активностью ~${f.tdee} ккал</div>
+      <div style="margin-top:4px">${goalsLine(f.suggested)}</div>
+      ${f.suggested.capped ? '<div class="small muted">Норма поднята до безопасного минимума — худеть быстрее не стоит без врача.</div>' : ""}
+      <button class="primary block" id="apply-formula" style="margin-top:10px">Сделать моей нормой</button>
+    </div>` : ""}`;
+  $("#profile-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(e.target));
+    try {
+      renderProfile(await api("/api/profile", { method: "PUT", json: {
+        sex: v.sex, birth_year: +v.birth_year, height_cm: +String(v.height_cm).replace(",", "."),
+        weight_kg: +String(v.weight_kg).replace(",", "."), activity: +v.activity, rate_kg_week: +v.rate_kg_week,
+      } }));
+    } catch (err) { toast(err.message); }
+  };
+  if (f) $("#apply-formula").onclick = () => applyGoals(f.suggested);
+  renderHealth(p.health);
+}
+
+function renderHealth(h, token = null) {
+  const box = $("#health-card");
+  if (!box) return;
+  const url = `${location.origin}/api/health`;
+  if (token) {
+    box.innerHTML = `
+      <b>⌚ Подключение Apple Watch</b>
+      <p class="small">Ключ показывается один раз — скопируй его в команду.</p>
+      <label>Адрес</label><div class="row"><input readonly value="${esc(url)}"><button data-copy-text="${esc(url)}">Копировать</button></div>
+      <label>Заголовок Authorization</label><div class="row"><input readonly value="Bearer ${esc(token)}"><button data-copy-text="Bearer ${esc(token)}">Копировать</button></div>
+      <ol class="howto small">
+        <li>«Команды» → «Автоматизация» → «+» → «Время суток»: 23:50, ежедневно, «Запускать сразу».</li>
+        <li>«Найти образцы здоровья»: тип «Активная энергия», дата начала — «Сегодня». Затем «Вычислить статистику» → «Сумма».</li>
+        <li>То же для типа «Шаги».</li>
+        <li>«Получить содержимое URL»: адрес выше, метод POST, заголовок Authorization со значением выше, тело JSON: <code>active_kcal</code> — первая сумма, <code>steps</code> — вторая (оба «Число»).</li>
+        <li>Вес можно не отправлять — пиши его в отчётах. Если взвешиваешься в «Здоровье», добавь <code>weight_kg</code>.</li>
+      </ol>
+      <button class="block" id="health-done">Готово</button>`;
+    box.querySelectorAll("[data-copy-text]").forEach((b) => b.addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(b.dataset.copyText); toast("Скопировано"); } catch { toast("Не удалось скопировать"); }
+    }));
+    $("#health-done").onclick = () => loadProfile();
+    return;
+  }
+  box.innerHTML = `
+    <b>⌚ Apple Watch и «Здоровье»</b>
+    <p class="muted small" style="margin:4px 0 10px">${h.connected
+      ? (h.last_day ? `Подключено. Последние данные — ${esc(dayLabel(h.last_day).toLowerCase())}.` : "Ключ выдан, данных пока не было.")
+      : "Команда на iPhone раз в день отправляет активные калории и шаги. Они появятся в дневнике, отчётах и обзоре недели."}</p>
+    <button class="block" id="health-token">${h.connected ? "Выдать новый ключ" : "Подключить"}</button>
+    ${h.connected ? '<button class="block danger" id="health-off" style="margin-top:8px">Отключить</button>' : ""}`;
+  $("#health-token").onclick = async () => {
+    try { renderHealth(h, (await api("/api/profile/health-token", { method: "POST" })).token); } catch (err) { toast(err.message); }
+  };
+  if (h.connected) $("#health-off").onclick = async () => {
+    if (!confirm("Отключить? Команда на телефоне перестанет работать.")) return;
+    try { await api("/api/profile/health-token", { method: "DELETE" }); renderHealth({ connected: false, last_day: h.last_day }); } catch (err) { toast(err.message); }
+  };
 }
 
 async function renderAdmin() {

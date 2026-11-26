@@ -102,6 +102,35 @@ class Weight(Base):
     kg: Mapped[float] = mapped_column(Float)
 
 
+class Profile(Base):
+    """What the goal calculator needs, plus the key the iPhone Shortcut sends Health data with."""
+
+    __tablename__ = "profiles"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    sex: Mapped[str | None] = mapped_column(String(1), nullable=True)  # m | f
+    birth_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height_cm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    activity: Mapped[float] = mapped_column(Float, default=1.375)  # see app.energy.ACTIVITY_LEVELS
+    rate_kg_week: Mapped[float] = mapped_column(Float, default=0.0)  # negative = losing
+    # sha256 of the Shortcut's token: the token itself is shown once and never stored.
+    health_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+
+
+class Activity(Base):
+    """One day of movement from Apple Health, sent by a Shortcut. A resend for the day replaces it."""
+
+    __tablename__ = "activity"
+    __table_args__ = (UniqueConstraint("user_id", "day"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date_] = mapped_column(Date)
+    active_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    steps: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class Review(Base):
     """A weekly review by the model, kept so the same day never pays twice. content is ReviewOut as JSON."""
 

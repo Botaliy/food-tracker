@@ -48,7 +48,7 @@ SCHEMA = {
 
 SYSTEM = """Ты разбираешь неделю дневника питания в трекере калорий и даёшь короткий обзор по-русски, обращаясь на «ты».
 
-Данные — суммы, посчитанные приложением: калории и БЖУ по дням, доля калорий по времени суток, продукты, давшие больше всего калорий, взвешивания. Нормы пользователь задал сам. Дни без записей — это пропуски в дневнике, а не голодание; не делай из них выводов о питании.
+Данные — суммы, посчитанные приложением: калории и БЖУ по дням, доля калорий по времени суток, продукты, давшие больше всего калорий, взвешивания. Если есть, по дням добавлены активные калории и шаги с Apple Watch; часы обычно завышают активные калории на 20–40%, так что сравнивай движение между днями, а не складывай его с нормой. Нормы пользователь задал сам. Дни без записей — это пропуски в дневнике, а не голодание; не делай из них выводов о питании.
 
 Как писать:
 - Опирайся на цифры из данных и называй их: «белок в среднем 85 г из 120», «вечером съедается 48% калорий».
@@ -69,8 +69,9 @@ def _part_of_day(hour: int) -> str:
     return next(name for start, name in reversed(PARTS) if hour >= start)
 
 
-def build_digest(meals, weights, goals: dict, tz: str, today: date) -> dict:
-    """The week as plain numbers. `meals` carry `.eaten_at` (naive UTC) and `.items`."""
+def build_digest(meals, weights, goals: dict, tz: str, today: date, activity=()) -> dict:
+    """The week as plain numbers. `meals` carry `.eaten_at` (naive UTC) and `.items`;
+    `activity` rows carry `.day`, `.active_kcal` and `.steps`, for the days the watch sent."""
     first = today - timedelta(days=REVIEW_DAYS - 1)
     zone = ZoneInfo(tz)
     days = {first + timedelta(days=k): {"kcal": 0.0, "protein": 0.0, "fat": 0.0, "carbs": 0.0, "meals": 0}
@@ -95,13 +96,16 @@ def build_digest(meals, weights, goals: dict, tz: str, today: date) -> dict:
             f["kcal"] += kcal
             f["times"] += 1
 
+    moves = {a.day: {k: v for k, v in (("active_kcal", a.active_kcal), ("steps", a.steps)) if v is not None}
+             for a in activity}
     total = sum(parts.values()) or 1.0
     top = sorted(foods.items(), key=lambda kv: -kv[1]["kcal"])[:10]
     return {
         "goals_per_day": goals,
         "days": [
             {"date": d.isoformat(), "weekday": WEEKDAYS[d.weekday()],
-             **({k: round(x) for k, x in t.items()} if t["meals"] else {"logged": False})}
+             **({k: round(x) for k, x in t.items()} if t["meals"] else {"logged": False}),
+             **{k: round(v) for k, v in moves.get(d, {}).items()}}
             for d, t in days.items()
         ],
         "kcal_share_by_part_of_day_percent": {p: round(100 * v / total) for p, v in parts.items()},

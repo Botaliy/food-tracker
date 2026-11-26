@@ -252,3 +252,15 @@ button.recent > .small { text-align: right; white-space: nowrap; }
 .review ul { margin: 4px 0 0; padding-left: 18px; }
 .review li { margin: 3px 0; font-size: 15px; }
 .review button.block { margin-top: 12px; }
+
+/* goals calculator, Apple Health, energy */
+.calc { margin-top: 14px; padding: 12px; border-radius: 14px; background: var(--accent-soft); }
+.move { display: flex; flex-direction: column; }
+.move span:last-child { font-weight: 600; font-size: 15px; }
+.energy-big { margin-top: 6px; }
+.energy-big b { font-size: 28px; letter-spacing: -0.6px; }
+.energy-extra { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+.need { display: flex; justify-content: space-between; font-size: 13px; margin-top: 8px; }
+.howto { padding-left: 18px; margin: 12px 0; }
+.howto li { margin: 6px 0; }
+code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--track); padding: 1px 5px; border-radius: 6px; }
