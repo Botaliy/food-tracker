@@ -23,4 +23,4 @@ APK — оболочка (Trusted Web Activity) вокруг сайта. Сай�
    scp android/app-release-signed.apk de-vpn:/root/food-tracker/data/android/kbju.apk
    ```
    Деплой для этого не нужен. Пока файла нет, ссылка в профиле скрыта.
-4. Проверить: `curl -sI https://<домен>/app.apk` → 200, и `/.well-known/assetlinks.json` отдаёт отпечаток ключа.
+4. Проверить: `curl -s -o /dev/null -w '%{http_code}' https://<домен>/app.apk` → 200 (на HEAD-запрос сервер отвечает 405, это нормально), и `/.well-known/assetlinks.json` отдаёт отпечаток ключа.
