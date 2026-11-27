@@ -1111,3 +1111,18 @@ def test_export_zip(client, db):
     client.post("/api/auth/login", json={"username": "boris", "password": "password1"})
     other = zipfile.ZipFile(io.BytesIO(client.get("/api/export").content))
     assert len(other.read("meals.csv").decode("utf-8-sig").splitlines()) == 1
+
+
+def test_asset_links_for_the_android_apk(client, monkeypatch):
+    from app import main
+
+    assert client.get("/.well-known/assetlinks.json").json() == []
+
+    monkeypatch.setattr(main.settings, "android_package", "app.example.food")
+    monkeypatch.setattr(main.settings, "android_cert_sha256", "aa:bb, CC:DD")
+    r = client.get("/.well-known/assetlinks.json")
+    assert r.headers["content-type"] == "application/json"
+    [link] = r.json()
+    assert link["relation"] == ["delegate_permission/common.handle_all_urls"]
+    assert link["target"] == {"namespace": "android_app", "package_name": "app.example.food",
+                              "sha256_cert_fingerprints": ["AA:BB", "CC:DD"]}

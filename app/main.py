@@ -52,6 +52,19 @@ def manifest():
     return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
 
 
+@app.get("/.well-known/assetlinks.json", include_in_schema=False)
+def asset_links():
+    """Tells Android that the APK signed with this certificate may open the site full screen."""
+    prints = [p.strip().upper() for p in settings.android_cert_sha256.split(",") if p.strip()]
+    if not settings.android_package or not prints:
+        return []
+    return [{
+        "relation": ["delegate_permission/common.handle_all_urls"],
+        "target": {"namespace": "android_app", "package_name": settings.android_package,
+                   "sha256_cert_fingerprints": prints},
+    }]
+
+
 @app.get("/healthz", include_in_schema=False)
 def healthz():
     return {"ok": True}

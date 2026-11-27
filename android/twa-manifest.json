@@ -1,0 +1,43 @@
+{
+  "packageId": "site.expense_tracker.food",
+  "host": "food.expense-tracker.site",
+  "name": "КБЖУ по фото",
+  "launcherName": "КБЖУ",
+  "display": "standalone",
+  "themeColor": "#f3f4f0",
+  "themeColorDark": "#0f110e",
+  "navigationColor": "#f3f4f0",
+  "navigationColorDark": "#0f110e",
+  "navigationDividerColor": "#f3f4f0",
+  "navigationDividerColorDark": "#0f110e",
+  "backgroundColor": "#f3f4f0",
+  "enableNotifications": true,
+  "startUrl": "/",
+  "iconUrl": "https://food.expense-tracker.site/static/icons/icon-512.png",
+  "maskableIconUrl": "https://food.expense-tracker.site/static/icons/icon-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "./release.keystore",
+    "alias": "food"
+  },
+  "appVersionName": "1",
+  "appVersionCode": 1,
+  "shortcuts": [],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://food.expense-tracker.site/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://food.expense-tracker.site/",
+  "minSdkVersion": 24,
+  "orientation": "portrait",
+  "fingerprints": [],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "appVersion": "1"
+}

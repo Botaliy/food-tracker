@@ -5,3 +5,8 @@ __pycache__/
 data/
 .pytest_cache/
 .claude/
+# Android APK: only the recipe is tracked; the signing key, its password and build output stay local.
+android/*
+!android/twa-manifest.json
+!android/package.json
+!android/package-lock.json

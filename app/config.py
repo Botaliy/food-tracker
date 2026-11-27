@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Timezone of new users until their browser reports its own.
     timezone: str = "Europe/Berlin"
 
+    # Android APK (a Trusted Web Activity around this site): the package name and the SHA-256
+    # fingerprint(s) of its signing certificate, comma-separated. Chrome checks them at
+    # /.well-known/assetlinks.json and hides the address bar only when they match.
+    android_package: str = ""
+    android_cert_sha256: str = ""
+
     db_path: str = "data/food.db"
 
     # Meal photo thumbnails (~20 KB each) are kept this many days; 0 = never stored.

@@ -1,0 +1,11 @@
+{
+  "name": "food-tracker-android",
+  "private": true,
+  "description": "Builds the Android APK (a Trusted Web Activity around the site)",
+  "scripts": {
+    "build": "bubblewrap update --skipVersionUpgrade && bubblewrap build --skipPwaValidation"
+  },
+  "devDependencies": {
+    "@bubblewrap/cli": "^1.28.0"
+  }
+}
