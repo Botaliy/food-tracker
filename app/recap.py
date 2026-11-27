@@ -41,7 +41,7 @@ def _spread(items: list, n: int) -> list:
     return [items[round(k * (len(items) - 1) / (n - 1))] for k in range(n)]
 
 
-def _longest_run(days: set[date]) -> int:
+def longest_run(days: set[date]) -> int:
     best = 0
     for d in days:
         if d - timedelta(days=1) not in days:
@@ -97,7 +97,7 @@ def build(db: Session, user: User, first: date, today: date) -> dict:
         "next": nxt.strftime("%Y-%m") if nxt <= today else None,
         "days_total": (last - first).days + 1,
         "logged_days": len(days),
-        "longest_run": _longest_run(set(days)),
+        "longest_run": longest_run(set(days)),
         "meals": len(meals),
         "in_goal_days": len(in_goal),
         "protein_days": len(protein_ok),

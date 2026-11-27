@@ -601,3 +601,25 @@ button.link { background: transparent; border: none; color: var(--accent-ink); f
 .recap-top li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 7px 0; counter-increment: top; }
 .recap-top li + li { border-top: 1px solid var(--card-border); }
 .recap-top li > span:first-child::before { content: counter(top) ". "; color: var(--muted); }
+
+/* «Резерв на вечер» */
+.reserve { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 14px; padding: 9px 12px; min-height: 40px; border: none; border-radius: 12px; background: var(--track); color: var(--muted); font: inherit; font-size: 14px; text-align: left; }
+.reserve.on { background: var(--accent-soft); color: var(--accent-ink); }
+.reserve .ic { width: 16px; height: 16px; flex: none; }
+.summary .reserve + .macros { margin-top: 14px; }
+
+/* «Значки» */
+.badges { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.badge-tile { display: flex; flex-direction: column; gap: 3px; padding: 12px; border-radius: 18px; background: var(--card); border: 1px solid var(--card-border); opacity: .6; }
+.badge-tile.on { opacity: 1; background: linear-gradient(160deg, var(--accent-soft), var(--card) 75%); }
+.badge-ico { width: 36px; height: 36px; border-radius: 12px; display: grid; place-items: center; background: var(--track); color: var(--muted); margin-bottom: 4px; }
+.badge-tile.on .badge-ico { background: var(--accent); color: var(--on-accent); }
+.badge-ico .ic { width: 20px; height: 20px; }
+.badge-state { font-size: 12px; font-weight: 600; margin-top: auto; padding-top: 4px; }
+.badge-tile.on .badge-state { color: var(--accent-ink); }
+
+.outlook { margin: 8px 0 0; font-size: 14px; align-items: flex-start; }
+.outlook .ic { flex: none; margin-top: 2px; color: var(--accent-ink); }
+
+.seg.parts { grid-template-columns: repeat(4, 1fr); margin: 14px 0 4px; }
+.seg.parts button { padding: 6px 2px; font-size: 13px; }

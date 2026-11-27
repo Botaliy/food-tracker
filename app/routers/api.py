@@ -19,7 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app import (auth, barcodes, coach, corrections, diary, energy, foods, idempotency, insights, photos, push, recap, recipes,
+from app import (auth, badges, barcodes, coach, corrections, diary, energy, foods, idempotency, insights, photos, push, recap, recipes,
                  review as review_mod, usage)
 from app.config import get_settings
 from app.database import get_db
@@ -475,12 +475,23 @@ RECENT_DAYS = 30
 
 
 @router.get("/meals/recent")
-def recent_meals(limit: int = Query(8, ge=1, le=20), user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
-    return _recent(db, user, limit)
+def recent_meals(limit: int = Query(8, ge=1, le=20), part: str | None = Query(None, pattern="^(breakfast|lunch|dinner|snack)$"),
+                 user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    return _recent(db, user, limit, part)
 
 
-def _recent(db: Session, user: User, limit: int) -> list[dict]:
-    """Meals worth repeating: the same title and set of products counts as one, most frequent first."""
+# The same borders as the meal cards' icons: before 5 and after 22 it's a snack.
+_PARTS = ((5, "snack"), (11, "breakfast"), (16, "lunch"), (22, "dinner"), (24, "snack"))
+
+
+def _part_of_day(eaten_at: datetime, tz: str) -> str:
+    hour = eaten_at.replace(tzinfo=UTC).astimezone(ZoneInfo(tz)).hour
+    return next(name for until, name in _PARTS if hour < until)
+
+
+def _recent(db: Session, user: User, limit: int, part: str | None = None) -> list[dict]:
+    """Meals worth repeating: the same title and set of products counts as one, most frequent first.
+    With a part of the day, what is usually eaten at that time comes first (`part_count` > 0)."""
     since = utcnow() - timedelta(days=RECENT_DAYS)
     meals = db.scalars(
         select(Meal)
@@ -494,9 +505,10 @@ def _recent(db: Session, user: User, limit: int) -> list[dict]:
         if key in groups:
             groups[key]["count"] += 1
         else:
-            groups[key] = {"count": 1, "meal": m}
-    ranked = sorted(groups.values(), key=lambda g: (-g["count"], -g["meal"].eaten_at.timestamp()))
-    return [{**_meal_dict(g["meal"], user.timezone), "count": g["count"]} for g in ranked[:limit]]
+            groups[key] = {"count": 1, "part": 0, "meal": m}
+        groups[key]["part"] += part is not None and _part_of_day(m.eaten_at, user.timezone) == part
+    ranked = sorted(groups.values(), key=lambda g: (-g["part"], -g["count"], -g["meal"].eaten_at.timestamp()))
+    return [{**_meal_dict(g["meal"], user.timezone), "count": g["count"], "part_count": g["part"]} for g in ranked[:limit]]
 
 
 # ---------- own dishes (recipes) ----------
@@ -687,10 +699,29 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "streaks": diary.streaks(db, user, _today(user)),
         "weight": _weight_outlook(db, user),
         "water": _water(db, user, the_day),
+        "reserve": diary.reserve(db.get(Profile, user.id), the_day),
         "suggest": insights.suggestions(
             user.kcal_goal - totals["kcal"], user.protein_goal - totals["protein"], _recent(db, user, 20)
         ) if the_day == _today(user) and meals else [],
     }
+
+
+class ReserveIn(BaseModel):
+    kcal: int = Field(ge=0, le=3000)
+
+
+@router.put("/reserve")
+def put_reserve(body: ReserveIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """Set calories aside for this evening; 0 takes the reserve back. It lives for today only."""
+    profile = _profile(db, user)
+    profile.reserve_day, profile.reserve_kcal = (_today(user), body.kcal) if body.kcal else (None, None)
+    db.commit()
+    return {"reserve": body.kcal}
+
+
+@router.get("/badges")
+def get_badges(user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    return {"badges": badges.earned(db, user, _today(user))}
 
 
 WEIGHT_OUTLOOK_DAYS = 90
@@ -915,6 +946,7 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
                     for w, (_, t) in zip(weights, energy.weight_trend([(w.day, w.kg) for w in weights]))],
         "last_weight": {"date": last_weight.day.isoformat(), "kg": last_weight.kg} if last_weight else None,
         "energy": _energy(db, user, today, rows),
+        "outlook": _weight_outlook(db, user),
     }
 
 
@@ -1337,7 +1369,13 @@ def streaks(user: User = Depends(auth.current_user), db: Session = Depends(get_d
                        # A couple of lucky plates is not a score yet.
                        "guess": guess if guess and guess["n"] >= diary.GUESS_MIN else None})
     people.sort(key=lambda p: (-p["streak"], not p["me"], p["name"]))
-    return {"joined": True, "people": people}
+    sharers = db.scalars(select(User).join(Profile, Profile.user_id == User.id)
+                         .where(Profile.share_streak.is_(True))).all()
+    duel = None
+    if len(sharers) >= 2:  # a duel needs someone to duel with
+        duel = diary.duel(db, sharers, diary.week_start(_today(user)))
+        duel["people"] = [{"name": p["name"], "score": p["score"], "me": p["id"] == user.id} for p in duel["people"]]
+    return {"joined": True, "people": people, "duel": duel}
 
 
 # ---------- coach chat ----------

@@ -176,6 +176,10 @@ class Profile(Base):
     last_evening_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
     last_weekly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
     last_monthly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+    last_duel_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+    # Calories set aside for the evening of one day (a bar, a dinner out).
+    reserve_day: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+    reserve_kcal: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class PushSubscription(Base):

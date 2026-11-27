@@ -3,6 +3,7 @@
 - Evening: at the hour the user picked, if nothing is logged today. With a streak at
   stake the message says so.
 - Monday morning: make the weekly review and say it's ready.
+- Monday morning, for those who share streaks: who won last week's duel.
 - The 1st, in the morning: the recap of the month that ended, if there was a diary to recap.
 
 Each kind goes out at most once a day per user (Profile.last_*_push), so a restart or a
@@ -13,7 +14,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -85,6 +86,13 @@ def run_due(db: Session, now: datetime, send: Callable = push.send) -> list[tupl
             if month["logged_days"] >= recap.MIN_DAYS and send(db, user, *recap.push_text(month), "/#recap"):
                 done.append((user.id, "monthly"))
 
+        if profile.share_streak and local.weekday() == 0 and local.hour >= WEEKLY_HOUR and profile.last_duel_push != today:
+            profile.last_duel_push = today
+            db.commit()
+            text = duel_text(db, user, today)
+            if text and send(db, user, *text, "/"):
+                done.append((user.id, "duel"))
+
         if (profile.weekly_review_push and local.weekday() == 0 and local.hour >= WEEKLY_HOUR
                 and profile.last_weekly_push != today):
             profile.last_weekly_push = today
@@ -97,6 +105,29 @@ def run_due(db: Session, now: datetime, send: Callable = push.send) -> list[tupl
             if send(db, user, "✨ Обзор недели готов", review_summary(made.content), "/#reports"):
                 done.append((user.id, "weekly"))
     return done
+
+
+def duel_text(db: Session, user: User, monday) -> tuple[str, str] | None:
+    """Last week's duel for this user, or None when there was nobody to duel or nothing was scored."""
+    sharers = db.scalars(select(User).join(Profile, Profile.user_id == User.id)
+                         .where(Profile.share_streak.is_(True))).all()
+    if len(sharers) < 2:
+        return None
+    result = diary.duel(db, sharers, monday - timedelta(days=7))
+    people, title = result["people"], result["title"]
+    top = people[0]["score"]
+    if top == 0:
+        return None
+    winners = [p for p in people if p["score"] == top]
+    mine = next(p["score"] for p in people if p["id"] == user.id)
+    if len(winners) > 1:
+        names = " и ".join("ты" if p["id"] == user.id else p["name"] for p in winners[:3])
+        body = f"Ничья: {names} — по {top} {title}."
+    elif winners[0]["id"] == user.id:
+        body = f"Ты победил: {top} {title}."
+    else:
+        body = f"Победил(а) {winners[0]['name']}: {top} {title}. У тебя — {mine}."
+    return "🏆 Дуэль недели", f"{body} Новая неделя — новая дуэль."
 
 
 def review_summary(content: str) -> str:

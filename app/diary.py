@@ -113,6 +113,51 @@ def guess_score(db: Session, user: User, on: date) -> dict | None:
     return {"n": len(misses), "off_percent": round(median(misses) * 100)} if misses else None
 
 
+# «Дуэль недели»: one contest a week among those who share streaks, Monday to Sunday.
+# The metric alternates by ISO week so the same person doesn't win on habit alone.
+DUELS = (("in_goal", "дней в норме"), ("protein", "дней с белком"))
+
+
+def week_start(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def duel_metric(monday: date) -> tuple[str, str]:
+    return DUELS[monday.isocalendar().week % len(DUELS)]
+
+
+def duel_score(db: Session, user: User, monday: date, upto: date) -> int:
+    """Good days of this week's metric from `monday` through `upto`."""
+    metric, _ = duel_metric(monday)
+    totals = day_totals(db, user, monday)
+    n = 0
+    for d, (kcal, protein) in totals.items():
+        if not monday <= d <= upto:
+            continue
+        if metric == "in_goal":
+            n += in_goal(kcal, user.kcal_goal)
+        else:
+            n += user.protein_goal > 0 and protein >= PROTEIN_OK * user.protein_goal
+    return n
+
+
+def duel(db: Session, users: list[User], monday: date, upto: date | None = None) -> dict:
+    """The standing of the week starting on `monday`; `upto` cuts it short (default: the whole week,
+    which for the week going on means each person's days so far)."""
+    upto = upto or monday + timedelta(days=6)
+    metric, title = duel_metric(monday)
+    people = sorted(({"id": u.id, "name": u.username, "score": duel_score(db, u, monday, upto)} for u in users),
+                    key=lambda p: (-p["score"], p["name"]))
+    return {"metric": metric, "title": title, "from": monday.isoformat(), "people": people}
+
+
+def reserve(profile, on: date) -> int:
+    """Calories set aside for the evening of `on`."""
+    if profile is None or profile.reserve_day != on or not profile.reserve_kcal:
+        return 0
+    return profile.reserve_kcal
+
+
 def streaks(db: Session, user: User, on: date) -> dict:
     """Everything the day screen shows about runs: logging (with its freeze), in goal, protein."""
     logged = logged_days(db, user, on - timedelta(days=STREAK_LOOKBACK_DAYS))

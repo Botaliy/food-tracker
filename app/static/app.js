@@ -285,6 +285,7 @@ async function loadDay() {
     state.streaks = streaks;
     renderDay();
     celebrate(dayData.streaks);
+    if (dayData.date === today) checkBadges();
   } catch (err) {
     if (err.status === 401) return renderAuth();
     const cached = err.status === 0 && state.day === today ? readStored("day", null) : null;
@@ -446,7 +447,10 @@ function refreshView() {
 function renderDay() {
   const { meals, totals: t, goals: g } = state.dayData;
   const isToday = state.day === isoDate(new Date());
-  const left = g.kcal - t.kcal;
+  // Calories set aside for tonight stay out of "left" until the evening comes.
+  const reserve = isToday ? state.dayData.reserve || 0 : 0;
+  const held = new Date().getHours() < RESERVE_OPENS ? reserve : 0;
+  const left = g.kcal - t.kcal - held;
   const d = new Date(state.day + "T12:00");
   const label = dayLabel(state.day);
   const sameWeekday = label !== "Сегодня" && label !== "Вчера";
@@ -467,6 +471,7 @@ function renderDay() {
           <div><span class="muted small">Норма</span><b>${g.kcal} <small>ккал</small></b></div>
         </div>
       </div>
+      ${isToday ? reserveLine(reserve, held) : ""}
       <div class="macros">
         ${[["p", "Белки", t.protein, g.protein, "var(--protein)"], ["f", "Жиры", t.fat, g.fat, "var(--fat)"], ["c", "Углеводы", t.carbs, g.carbs, "var(--carbs)"]]
           .map(([k, n, v, goal, c]) => `<div class="macro">${ring(k, v, goal, c, 62, 7, `<b>${r0(v)}</b>`)}
@@ -481,12 +486,87 @@ function renderDay() {
       ? `<h3 class="sub">Приёмы пищи</h3>${meals.map(mealCard).join("")}`
       : `<div class="empty"><div class="empty-ico">${ICONS.camera}</div><b>Пока пусто</b>
           <p>Нажми «+» внизу и сфотографируй еду — посчитаю калории и БЖУ.</p></div>`}
-    ${isToday ? suggestRow(state.dayData.suggest, g.kcal - t.kcal) : ""}
+    ${isToday ? suggestRow(state.dayData.suggest, left) : ""}
     ${isToday ? streaksRow(state.streaks, { others: true }) : ""}`;
   animateRings();
 }
 
 const fmtInt = (n) => r0(n).toLocaleString("ru-RU");
+
+// «Резерв на вечер»: calories put aside in the morning for a bar or a dinner out.
+const RESERVE_OPENS = 18; // local hour when the reserve joins "left" again
+const RESERVE_PICKS = [300, 500, 800];
+
+function reserveLine(reserve, held) {
+  if (!reserve && new Date().getHours() >= RESERVE_OPENS) return "";
+  const text = !reserve ? "Отложить калории на вечер"
+    : held ? `Отложено на вечер: <b>${fmtInt(reserve)} ккал</b>` : `Резерв на вечер открыт: <b>${fmtInt(reserve)} ккал</b>`;
+  return `<button class="reserve ${reserve ? "on" : ""}" data-act="reserve">${ICONS.moon}<span class="grow">${text}</span>${ICONS.right}</button>`;
+}
+
+function openReserve() {
+  const now = state.dayData?.reserve || 0;
+  openSheet(`
+    <div class="row between"><h2>Резерв на вечер</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    <p class="muted small" style="margin:0 0 10px">Вечером бар или ужин в гостях? Отложи калории заранее: до ${RESERVE_OPENS}:00 «осталось» будет считаться без них, а вечером они вернутся. Норма дня не меняется.</p>
+    <div class="row" style="flex-wrap:wrap;gap:6px;margin-bottom:10px">${RESERVE_PICKS.map((k) => `<button class="chip-btn ${k === now ? "on" : ""}" data-reserve="${k}">${k} ккал</button>`).join("")}</div>
+    <form id="reserve-form" class="row">
+      <input id="reserve-kcal" type="text" inputmode="numeric" autocomplete="off" placeholder="ккал" value="${now || ""}">
+      <button class="primary">Отложить</button>
+    </form>
+    ${now ? '<button class="block danger" data-reserve="0" style="margin-top:10px">Убрать резерв</button>' : ""}`);
+  $("#reserve-form").onsubmit = (e) => { e.preventDefault(); saveReserve(Number($("#reserve-kcal").value.trim())); };
+}
+
+async function saveReserve(kcal) {
+  if (!Number.isInteger(kcal) || kcal < 0 || kcal > 3000) return toast("Резерв — целое число до 3000 ккал");
+  try {
+    await api("/api/reserve", { method: "PUT", json: { kcal } });
+    state.dayData.reserve = kcal;
+    closeSheet();
+    renderDay();
+    toast(kcal ? `Отложено на вечер: ${kcal} ккал` : "Резерв убран");
+  } catch (err) { toast(err.message); }
+}
+
+// «Значки»: counted by the server from the diary; this device only remembers which it has announced.
+const badgeSeenKey = () => `ft-badges:${state.me?.username || ""}`;
+
+async function checkBadges() {
+  let list;
+  try { list = (await api("/api/badges")).badges; } catch { return; }
+  state.badges = list;
+  const have = list.filter((b) => b.earned).map((b) => b.key);
+  let seen = null;
+  try {
+    seen = JSON.parse(localStorage.getItem(badgeSeenKey()) || "null");
+    localStorage.setItem(badgeSeenKey(), JSON.stringify(have));
+  } catch { return; }
+  if (!Array.isArray(seen)) return; // the first look on this device: nothing to announce
+  const fresh = list.find((b) => b.earned && !seen.includes(b.key));
+  if (fresh) setTimeout(() => toast(`Новый значок: «${fresh.title}»`, { label: "Показать", run: openBadges }), 900);
+}
+
+async function openBadges() {
+  try {
+    if (!state.badges) state.badges = (await api("/api/badges")).badges;
+  } catch (err) { return toast(err.message); }
+  const list = state.badges;
+  openSheet(`
+    <div class="row between"><h2>Значки</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    <p class="muted small" style="margin:0 0 12px">Получено ${list.filter((b) => b.earned).length} из ${list.length}</p>
+    <div class="badges">${list.map((b) => `<div class="badge-tile ${b.earned ? "on" : ""}">
+      <span class="badge-ico">${ICONS[b.icon] || ICONS.flag}</span>
+      <b>${esc(b.title)}</b>
+      <span class="muted small">${esc(b.hint)}</span>
+      ${b.earned ? '<span class="badge-state">получен</span>' : b.target > 1 ? `<span class="badge-state">${b.value} / ${b.target}</span>${bar(b.value, b.target)}` : ""}
+    </div>`).join("")}</div>`);
+}
+sheetBody.addEventListener("click", (e) => {
+  if (e.target.closest("[data-open-badges]")) return openBadges();
+  const pick = e.target.closest("[data-reserve]");
+  if (pick) saveReserve(Number(pick.dataset.reserve));
+});
 
 const kgFmt = (n) => String(r1(n)).replace(".", ",");
 
@@ -624,6 +704,8 @@ function openStreak() {
         ${st.guess ? line(ICONS.camera, `Глазомер: промах ${st.guess.off_percent}%`, `Обычный промах в «Угадай калории» за неделю, ${st.guess.n} ${plural(st.guess.n, "тарелка", "тарелки", "тарелок")}`) : ""}
       </ul>
     </div>
+    <button class="block" data-open-badges>Значки</button>
+    ${duelRow(state.streaks)}
     ${guessRow(state.streaks)}
     ${streaksRow(state.streaks) || '<p class="muted small">Общие серии с друзьями включаются в «Профиль → Уведомления».</p>'}`);
 }
@@ -637,6 +719,15 @@ function celebrate(st) {
     localStorage.setItem(key, String(st.days));
   } catch { return; }
   setTimeout(() => toast(`${st.days} ${plural(st.days, "день", "дня", "дней")} подряд! Так держать`), 400);
+}
+
+// «Дуэль недели»: Monday to Sunday among those who share streaks, the metric changes every week.
+function duelRow(st) {
+  const d = st?.joined ? st.duel : null;
+  if (!d) return "";
+  return `<div class="streaks"><span class="streaks-title">Дуэль недели: ${esc(d.title)}</span>${d.people.map((p) =>
+    `<span class="chip ${p.me ? "me" : ""}">${esc(p.me ? "ты" : p.name)} <b>${p.score}</b></span>`).join("")}
+    <span class="muted small">Итог — в понедельник</span></div>`;
 }
 
 // «Угадай калории» among those who share streaks: the smallest usual miss first.
@@ -861,6 +952,10 @@ app.addEventListener("click", (e) => {
     renderWaterSheet();
   } else if (act === "streak") {
     openStreak();
+  } else if (act === "reserve") {
+    openReserve();
+  } else if (act === "badges") {
+    openBadges();
   } else if (act === "profile-back") {
     profileBack();
   } else if (act?.startsWith("profile:")) {
@@ -1003,6 +1098,7 @@ function renderStats() {
     <div class="card">
       <div class="row between"><b>Вес</b><span class="muted small">${delta === null ? (s.last_weight ? `последний: ${s.last_weight.kg} кг, ${esc(shortDate(s.last_weight.date))}` : "") : `тренд ${delta > 0 ? "+" : delta < 0 ? "−" : ""}${String(Math.abs(delta)).replace(".", ",")} кг за период`}</span></div>
       ${weightChart(s)}
+      ${outlookLine(s.outlook)}
       <p class="muted small" style="margin:6px 0 0">Точки — взвешивания, линия — сглаженный тренд: суточные скачки воды почти не двигают её.</p>
       <form class="row" id="weight-form" style="margin-top:10px">
         <input id="weight" type="text" inputmode="decimal" autocomplete="off" placeholder="Вес сегодня, кг" value="${todayW ? todayW.kg : ""}">
@@ -1021,6 +1117,18 @@ function renderStats() {
     </div>
 `;
   $("#weight-form").onsubmit = (e) => { e.preventDefault(); saveWeight(); };
+}
+
+// Where the weight is heading, in words: the date it meets the goal at the last four weeks' pace.
+function outlookLine(w) {
+  if (!w?.goal) return "";
+  const goal = `${kgFmt(w.goal)} кг`;
+  let text;
+  if (w.eta === "reached") text = `Цель ${goal} достигнута`;
+  else if (w.eta) text = `При таком темпе ${goal} будет к <b>${new Date(w.eta + "T12:00").toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: new Date(w.eta).getFullYear() === new Date().getFullYear() ? undefined : "numeric" })}</b>`;
+  else if (w.kg_per_week == null) text = `Прогноз до ${goal} появится, когда взвешиваний наберётся на неделю`;
+  else text = `Сейчас вес к цели ${goal} не движется: ${paceText(w)}`;
+  return `<p class="outlook with-ico">${ICONS.flag}<span>${text}</span></p>`;
 }
 
 // Fibre and salt against their reference points, sugar as a bare number; each only with data.
@@ -1113,18 +1221,93 @@ function recapHtml(r) {
       </ul>
     </div>
     ${r.top.length ? `<div class="card"><b>Чаще всего в тарелке</b>
-      <ol class="recap-top">${r.top.map((t) => `<li><span>${esc(t.name)}</span><span class="muted small">${t.times} ${plural(t.times, "раз", "раза", "раз")}</span></li>`).join("")}</ol></div>` : ""}`}`;
+      <ol class="recap-top">${r.top.map((t) => `<li><span>${esc(t.name)}</span><span class="muted small">${t.times} ${plural(t.times, "раз", "раза", "раз")}</span></li>`).join("")}</ol></div>` : ""}
+    <button class="block" data-recap-share>Поделиться картинкой</button>`}`;
+}
+
+// The recap as one picture for a chat: the collage and the main numbers, drawn on this device.
+async function recapPicture(r) {
+  const W = 1080, PAD = 64, GAP = 12;
+  const photos = (await Promise.all(r.photos.slice(0, 9).map(async (p) => {
+    const img = new Image();
+    img.src = `/api/photos/${encodeURIComponent(p.photo)}`;
+    try { await img.decode(); return img; } catch { return null; }
+  }))).filter(Boolean);
+  const shown = photos.slice(0, photos.length >= 9 ? 9 : photos.length >= 6 ? 6 : photos.length >= 3 ? 3 : 0);
+  const cell = (W - 2 * PAD - 2 * GAP) / 3;
+  const collageH = shown.length ? (shown.length / 3) * cell + (shown.length / 3 - 1) * GAP : 0;
+  const lines = [
+    r.best_day ? `Лучший день — ${dayLabel(r.best_day.date).toLowerCase()}` : "",
+    `Самая длинная серия — ${daysWord(r.longest_run)}`,
+    r.top.length ? `Чаще всего: ${r.top.slice(0, 3).map((t) => t.name.toLowerCase()).join(", ")}` : "",
+  ].filter(Boolean);
+  const H = PAD + 150 + (collageH ? collageH + 48 : 0) + 190 + lines.length * 58 + PAD + 30;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const x = c.getContext("2d");
+  const bg = x.createLinearGradient(0, 0, W, H);
+  bg.addColorStop(0, "#14532d"); bg.addColorStop(1, "#0b1f14");
+  x.fillStyle = bg; x.fillRect(0, 0, W, H);
+  const font = (px, weight = 400) => (x.font = `${weight} ${px}px -apple-system, system-ui, "Segoe UI", Roboto, sans-serif`);
+  x.textBaseline = "top";
+  x.fillStyle = "#fff"; font(78, 700);
+  x.fillText(r.complete ? `Итоги ${monthGen(r.month)}` : monthNom(r.month), PAD, PAD);
+  x.fillStyle = "rgba(255,255,255,.6)"; font(32);
+  x.fillText(`${r.month.slice(0, 4)} · КБЖУ по фото`, PAD, PAD + 96);
+  let y = PAD + 150;
+  shown.forEach((img, k) => {
+    const side = Math.min(img.naturalWidth, img.naturalHeight); // centre crop to a square
+    x.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side,
+      PAD + (k % 3) * (cell + GAP), y + Math.floor(k / 3) * (cell + GAP), cell, cell);
+  });
+  if (collageH) y += collageH + 48;
+  [[`${r.logged_days} / ${r.days_total}`, "дней с записями"], [String(r.in_goal_days), "дней в норме"], [String(r.avg_kcal), "ккал в среднем"]].forEach(([big, small], k) => {
+    const cx = PAD + k * ((W - 2 * PAD) / 3);
+    x.fillStyle = "#fff"; font(72, 700); x.fillText(big, cx, y);
+    x.fillStyle = "rgba(255,255,255,.6)"; font(30); x.fillText(small, cx, y + 88);
+  });
+  y += 190;
+  x.fillStyle = "rgba(255,255,255,.9)"; font(36);
+  for (const line of lines) {
+    let text = line;
+    while (x.measureText(text).width > W - 2 * PAD && text.length > 10) text = text.slice(0, -2).trimEnd() + "…";
+    x.fillText(text, PAD, y); y += 58;
+  }
+  return new Promise((done) => c.toBlob(done, "image/jpeg", 0.9));
+}
+
+async function shareRecap(r, btn) {
+  btn.disabled = true;
+  try {
+    const blob = await recapPicture(r);
+    const file = new File([blob], `itogi-${r.month}.jpg`, { type: "image/jpeg" });
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({ files: [file] });
+    } else {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = file.name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      toast("Картинка сохранена");
+    }
+  } catch (err) {
+    if (err.name !== "AbortError") toast("Не получилось собрать картинку");
+  } finally { btn.disabled = false; }
 }
 
 async function openRecap(month = null) {
   try {
     const r = month || !state.recap ? await api(`/api/recap${month ? `?month=${month}` : ""}`) : state.recap;
+    state.recapShown = r;
     openSheet(recapHtml(r));
   } catch (err) { toast(err.message); }
 }
 sheetBody.addEventListener("click", (e) => {
   const nav = e.target.closest("[data-recap-month]");
-  if (nav) openRecap(nav.dataset.recapMonth);
+  if (nav) return openRecap(nav.dataset.recapMonth);
+  const share = e.target.closest("[data-recap-share]");
+  if (share) shareRecap(state.recapShown, share);
 });
 
 function reviewCard() {
@@ -1221,13 +1404,18 @@ function openAdd() {
 }
 
 let recentMeals = [];
-async function loadRecent() {
-  try { recentMeals = await api("/api/meals/recent"); store("recent", recentMeals); }
-  catch (err) { recentMeals = err.status === 0 ? readStored("recent", []) : []; }
+// What is usually eaten at this time of day first: breakfasts in the morning, dinners in the evening.
+const DAY_PARTS = [["breakfast", "Завтрак", "На завтрак обычно"], ["lunch", "Обед", "На обед обычно"], ["dinner", "Ужин", "На ужин обычно"], ["snack", "Перекус", "На перекус обычно"]];
+const partNow = () => { const h = new Date().getHours(); return h < 5 ? "snack" : h < 11 ? "breakfast" : h < 16 ? "lunch" : h < 22 ? "dinner" : "snack"; };
+let recentPart = null;
+
+async function loadRecent(part = partNow()) {
+  recentPart = part;
+  try { recentMeals = await api(`/api/meals/recent?part=${part}`); store(`recent:${part}`, recentMeals); }
+  catch (err) { recentMeals = err.status === 0 ? readStored(`recent:${part}`, []) : []; }
   const box = $("#recent");
-  if (!box) return;
-  if (!recentMeals.length) { box.innerHTML = ""; return; }
-  box.innerHTML = `<h3 class="sub">Часто ешь <span class="muted">— тап записывает сразу</span></h3>` + recentMeals.map((m, j) => `
+  if (!box || recentPart !== part) return;
+  const row = (m, j) => `
     <div class="recent">
       <button class="recent-main" data-recent="${j}">
         <span class="grow"><b>${esc(m.title || m.items.map((i) => i.name).join(", "))}</b>
@@ -1235,8 +1423,22 @@ async function loadRecent() {
         <span class="small"><b>${r0(m.totals.kcal)}</b> ккал${m.count > 1 ? `<br><span class="muted">×${m.count}</span>` : ""}</span>
       </button>
       <button class="recent-edit" data-recent-edit="${j}" aria-label="Изменить перед записью">${ICONS.pencil}</button>
-    </div>`).join("");
+    </div>`;
+  const rows = recentMeals.map((m, j) => [m, row(m, j)]);
+  const usual = rows.filter(([m]) => m.part_count > 0).map(([, h]) => h).join("");
+  const rest = rows.filter(([m]) => !(m.part_count > 0)).map(([, h]) => h).join("");
+  const parts = `<div class="seg parts">${DAY_PARTS.map(([key, label]) => `<button data-recent-part="${key}" class="${key === part ? "on" : ""}">${label}</button>`).join("")}</div>`;
+  const hint = '<span class="muted">— тап записывает сразу</span>';
+  const title = DAY_PARTS.find(([key]) => key === part)[2];
+  if (!recentMeals.length) { box.innerHTML = ""; return; }
+  box.innerHTML = parts
+    + (usual ? `<h3 class="sub">${title} ${hint}</h3>${usual}` : `<p class="muted small" style="margin:4px 2px 0">${title} пока ничего не записывал — вот что ешь часто.</p>`)
+    + (rest ? `<h3 class="sub">${usual ? "Остальное из частого" : `Часто ешь ${hint}`}</h3>${rest}` : "");
 }
+sheetBody.addEventListener("click", (e) => {
+  const part = e.target.closest("[data-recent-part]");
+  if (part) loadRecent(part.dataset.recentPart);
+});
 
 // One tap: the meal is written as it was, with an undo.
 async function logAgain(m) {
@@ -2209,6 +2411,7 @@ function renderProfileList(me, p) {
     ${topbar("Профиль", me.username, "")}
     <div class="card list">${Object.keys(PROFILE_SECTIONS).filter((k) => !PROFILE_SECTIONS[k].admin || me.is_admin).map(row).join("")}</div>
     <div class="card list">
+      <button class="lrow" data-act="badges"><span class="lrow-ico">${ICONS.party}</span><span class="grow"><span class="lrow-title">Значки</span><span class="lrow-value">${state.badges ? `${state.badges.filter((b) => b.earned).length} из ${state.badges.length}` : "За серии, тарелки и точный глазомер"}</span></span><span class="lrow-chev">${ICONS.right}</span></button>
       ${p.android_apk ? `<button class="lrow" id="android-apk"><span class="lrow-ico">${ICONS.download}</span><span class="grow"><span class="lrow-title">Приложение для Android</span><span class="lrow-value">${IS_ANDROID ? "Скачать APK" : "Отправить ссылку на APK"}</span></span></button>` : ""}
       <button class="lrow" id="replay-onboarding"><span class="lrow-ico">${ICONS.replay}</span><span class="grow"><span class="lrow-title">Пройти первые шаги заново</span></span></button>
       <button class="lrow danger" id="logout"><span class="lrow-ico">${ICONS.logout}</span><span class="grow"><span class="lrow-title">Выйти</span></span></button>
@@ -2357,7 +2560,7 @@ function dropCoachImage() {
 }
 
 // What a picture is usually for: one tap sends it with the question.
-const ATTACH_ASKS = [["Что взять из меню?", "Что взять из этого меню под мой остаток на сегодня?"], ["Запиши это", "Запиши это"]];
+const ATTACH_ASKS = [["Что взять из меню?", "Что взять из этого меню под мой остаток на сегодня?"], ["Что приготовить?", "Что приготовить из этих продуктов под мой остаток на сегодня?"], ["Запиши это", "Запиши это"]];
 const attachChip = () => coachImage
   ? `<span class="chip attach-chip"><img src="${coachImage.url}" alt="">Фото
       <button type="button" class="ghost" data-attach-drop aria-label="Убрать фото">${ICONS.close}</button></span>
