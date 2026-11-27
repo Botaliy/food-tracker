@@ -24,7 +24,7 @@ from app import (auth, barcodes, coach, corrections, diary, energy, foods, idemp
 from app.config import get_settings
 from app.database import get_db
 from app.drafts import build_draft, build_recipe_draft, draft_item
-from app.images import release_memory, shrink
+from app.images import TEXT_IMAGE_EDGE, release_memory, shrink
 from app.models import (Activity, ChatMessage, Food, Invite, Meal, MealItem, Profile, PushSubscription, RecipeItem, Review, User,
                         Water, Weight, Workout, utcnow)
 from app.recognize import RecognizedItem, RecognizeError, RecognizeErrorWithResponse, recognize, recognize_recipe
@@ -1471,7 +1471,7 @@ def _coach_image(raw: str) -> bytes:
         data = base64.b64decode(raw, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=400, detail=BAD_IMAGE) from exc
-    jpeg = shrink(data)
+    jpeg = shrink(data, TEXT_IMAGE_EDGE)
     del data
     release_memory()  # as after a meal photo: the container has 250 MB
     if jpeg is None:

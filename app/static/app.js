@@ -2242,15 +2242,18 @@ function dropCoachImage() {
   coachImage = null;
 }
 
+// What a picture is usually for: one tap sends it with the question.
+const ATTACH_ASKS = [["Что взять из меню?", "Что взять из этого меню под мой остаток на сегодня?"], ["Запиши это", "Запиши это"]];
 const attachChip = () => coachImage
-  ? `<span class="chip attach-chip"><img src="${coachImage.url}" alt="">Скриншот
-      <button type="button" class="ghost" data-attach-drop aria-label="Убрать скриншот">${ICONS.close}</button></span>` : "";
+  ? `<span class="chip attach-chip"><img src="${coachImage.url}" alt="">Фото
+      <button type="button" class="ghost" data-attach-drop aria-label="Убрать фото">${ICONS.close}</button></span>
+      ${ATTACH_ASKS.map(([label], j) => `<button type="button" class="chip attach-ask" data-attach-ask="${j}">${label}</button>`).join("")}` : "";
 
-const imageMark = `<span class="bubble-img">${ICONS.image}скриншот</span>`;
+const imageMark = `<span class="bubble-img">${ICONS.image}фото</span>`;
 const userBubble = (text, hasImage) => `<div class="bubble user">${hasImage ? imageMark : ""}${text ? `<p>${esc(text)}</p>` : ""}</div>`;
 
 async function attachCoachImage(file) {
-  const blob = await shrinkPhoto(file);
+  const blob = await shrinkPhoto(file, 1568); // the small print of a menu needs more pixels than a plate
   const data = await new Promise((ok, fail) => {
     const r = new FileReader();
     r.onload = () => ok(r.result);
@@ -2277,13 +2280,13 @@ function renderCoach(pending = null) {
       c.messages.length ? `<button class="icon" data-act="coach-clear" aria-label="Очистить чат">${ICONS.trash}</button>` : "")}
     <div class="chat" id="chat">
       ${c.messages.length ? bubbles : `<div class="empty"><div class="empty-ico">${ICONS.chat}</div><b>Спроси что угодно о питании</b>
-        <p>Коуч видит твой дневник: норму, что съедено сегодня, неделю, вес, тренировки и серии. Можно приложить скриншот тренировки из приложения часов — он предложит её записать.</p></div>
+        <p>Коуч видит твой дневник: норму, что съедено сегодня, неделю, вес, тренировки и серии. Можно приложить фото меню в кафе — подскажет, что взять, или скриншот тренировки из приложения часов — предложит её записать.</p></div>
         <div class="starters">${COACH_STARTERS.map((q, j) => `<button class="chip" data-starter="${j}">${esc(q)}</button>`).join("")}</div>`}
       ${pending ? `${userBubble(pending.text, pending.image)}<div class="bubble assistant typing"><i></i><i></i><i></i></div>` : ""}
     </div>
     <form class="composer" id="coach-form">
       <div id="coach-attach">${open ? attachChip() : ""}</div>
-      ${open ? `<label class="btn icon-pick" aria-label="Приложить скриншот">${ICONS.image}<input type="file" accept="image/*" id="coach-file"></label>` : ""}
+      ${open ? `<label class="btn icon-pick" aria-label="Приложить фото или скриншот">${ICONS.image}<input type="file" accept="image/*" id="coach-file"></label>` : ""}
       <textarea id="coach-text" rows="1" placeholder="${left ? "Напиши коучу…" : "Продолжим завтра"}" ${open ? "" : "disabled"} maxlength="2000"></textarea>
       ${open ? micButton("coach-text") : ""}
       <button class="primary" ${open ? "" : "disabled"} aria-label="Отправить">${ICONS.up}</button>
@@ -2297,6 +2300,8 @@ function renderCoach(pending = null) {
   const file = $("#coach-file");
   if (file) file.onchange = () => { if (file.files[0]) attachCoachImage(file.files[0]); file.value = ""; };
   $("#coach-attach").onclick = (e) => {
+    const ask = e.target.closest("[data-attach-ask]");
+    if (ask) return sendCoach(ATTACH_ASKS[Number(ask.dataset.attachAsk)][1]);
     if (!e.target.closest("[data-attach-drop]")) return;
     dropCoachImage();
     $("#coach-attach").innerHTML = "";

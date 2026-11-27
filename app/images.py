@@ -14,17 +14,19 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 # ~1.6k image tokens at this size; more pixels don't help to tell rice from buckwheat.
 MAX_IMAGE_EDGE = 1280
+# A menu or a watch screenshot in the coach chat is read, not recognized: small print needs the pixels.
+TEXT_IMAGE_EDGE = 1568
 
 
-def shrink(raw: bytes) -> bytes | None:
-    """The photo as a JPEG no larger than MAX_IMAGE_EDGE; None if it isn't an image."""
+def shrink(raw: bytes, max_edge: int = MAX_IMAGE_EDGE) -> bytes | None:
+    """The photo as a JPEG no larger than max_edge; None if it isn't an image."""
     try:
         with Image.open(io.BytesIO(raw)) as img:
-            scale = MAX_IMAGE_EDGE / max(img.size)
+            scale = max_edge / max(img.size)
             if scale < 1:
                 img.draft("RGB", (int(img.width * scale), int(img.height * scale)))
             img = ImageOps.exif_transpose(img)
-            img.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
+            img.thumbnail((max_edge, max_edge))
             buf = io.BytesIO()
             img.convert("RGB").save(buf, format="JPEG", quality=85)
             return buf.getvalue()

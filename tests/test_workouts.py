@@ -144,3 +144,17 @@ def test_export_has_workouts(client, db):
     rows = list(csv.reader(io.StringIO(zf.read("workouts.csv").decode("utf-8-sig"))))
     assert rows == [["date", "time", "kind", "minutes", "kcal", "distance_km", "avg_hr"],
                     [_local_today().isoformat(), "18:00", "Велосипед", "60", "480.0", "22.5", "135"]]
+
+
+def test_menu_photo_keeps_its_small_print(client, db, coach_says):
+    """A picture in the chat is read (a menu, a watch screen), so it goes in larger than a plate."""
+    from app.images import MAX_IMAGE_EDGE, TEXT_IMAGE_EDGE
+    buf = io.BytesIO()
+    Image.new("RGB", (3000, 2000), "white").save(buf, format="JPEG")
+    fake = coach_says(fake_response("Возьми лосося на гриле."))
+    r = client.post("/api/coach", json={"text": "Что взять из этого меню?", "image": base64.b64encode(buf.getvalue()).decode()})
+    assert r.status_code == 200, r.text
+    assert r.json()["messages"][1]["actions"] == []
+    sent = fake.kwargs["messages"][-1]["content"][0]["source"]["data"]
+    assert max(Image.open(io.BytesIO(base64.b64decode(sent))).size) == TEXT_IMAGE_EDGE > MAX_IMAGE_EDGE
+    assert "меню" in fake.kwargs["system"][0]["text"]
