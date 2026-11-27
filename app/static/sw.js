@@ -1,7 +1,7 @@
 // Network first for the shell, with the last good copy as the fallback: without a
 // connection the app still opens, shows the diary it saved last and queues quick
 // writes (app.js). The API is never cached here.
-const CACHE = "food-shell-v20";
+const CACHE = "food-shell-v21";
 const SHELL = ["/", "/static/app.js", "/static/style.css", "/manifest.webmanifest", "/static/icons/icon.svg", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
@@ -17,7 +17,7 @@ self.addEventListener("activate", (e) => {
 
 self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
-  if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/")) return;
+  if (e.request.method !== "GET" || url.origin !== location.origin || url.pathname.startsWith("/api/") || url.pathname === "/app.apk") return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {

@@ -1126,3 +1126,23 @@ def test_asset_links_for_the_android_apk(client, monkeypatch):
     assert link["relation"] == ["delegate_permission/common.handle_all_urls"]
     assert link["target"] == {"namespace": "android_app", "package_name": "app.example.food",
                               "sha256_cert_fingerprints": ["AA:BB", "CC:DD"]}
+
+
+def test_android_apk_is_offered_once_the_file_is_there(client):
+    from app.config import get_settings
+
+    apk = get_settings().android_apk
+    apk.unlink(missing_ok=True)
+    assert client.get("/app.apk").status_code == 404
+    assert client.get("/api/profile").json()["android_apk"] is False
+
+    apk.parent.mkdir(parents=True, exist_ok=True)
+    apk.write_bytes(b"PK\x03\x04")
+    try:
+        client.cookies.clear()  # no sign-in: the link is forwarded to a friend
+        r = client.get("/app.apk")
+        assert r.status_code == 200 and r.content == b"PK\x03\x04"
+        assert r.headers["content-type"] == "application/vnd.android.package-archive"
+        assert 'filename="kbju.apk"' in r.headers["content-disposition"]
+    finally:
+        apk.unlink()

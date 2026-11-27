@@ -1917,6 +1917,7 @@ async function findBarcode(raw) {
 
 // The profile is a list of sections; each opens as a sub-screen at #profile/<key>,
 // so the browser's Back returns to the list.
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
 const PROFILE_SECTIONS = {
   goals: { icon: "target", title: "Норма и цель" },
   water: { icon: "drop", title: "Вода" },
@@ -2037,6 +2038,7 @@ function renderProfileList(me, p) {
     ${topbar("Профиль", me.username, "")}
     <div class="card list">${Object.keys(PROFILE_SECTIONS).filter((k) => !PROFILE_SECTIONS[k].admin || me.is_admin).map(row).join("")}</div>
     <div class="card list">
+      ${p.android_apk ? `<button class="lrow" id="android-apk"><span class="lrow-ico">${ICONS.download}</span><span class="grow"><span class="lrow-title">Приложение для Android</span><span class="lrow-value">${IS_ANDROID ? "Скачать APK" : "Отправить ссылку на APK"}</span></span></button>` : ""}
       <button class="lrow" id="replay-onboarding"><span class="lrow-ico">${ICONS.replay}</span><span class="grow"><span class="lrow-title">Пройти первые шаги заново</span></span></button>
       <button class="lrow danger" id="logout"><span class="lrow-ico">${ICONS.logout}</span><span class="grow"><span class="lrow-title">Выйти</span></span></button>
     </div>
@@ -2048,6 +2050,15 @@ function renderProfileList(me, p) {
     state.me = null; renderAuth();
   };
   $("#replay-onboarding").onclick = () => renderOnboarding(1);
+  // On Android the file itself; anywhere else the link, to pass on to a friend with an Android phone.
+  if ($("#android-apk")) $("#android-apk").onclick = async () => {
+    const url = location.origin + "/app.apk";
+    if (IS_ANDROID) { location.href = url; return; }
+    try {
+      if (navigator.share) await navigator.share({ title: "КБЖУ по фото для Android", url });
+      else { await navigator.clipboard.writeText(url); toast("Ссылка на APK скопирована"); }
+    } catch { /* the share sheet was closed */ }
+  };
 }
 
 // ---------- coach ----------

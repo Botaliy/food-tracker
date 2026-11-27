@@ -995,6 +995,7 @@ def _profile_dict(db: Session, user: User, profile: Profile) -> dict:
         "activity_levels": [{"value": k, "label": v} for k, v in energy.ACTIVITY_LEVELS.items()],
         "rates": [{"value": k, "label": v} for k, v in energy.RATES.items()],
         "formula": _formula(profile, last_weight, today),
+        "android_apk": get_settings().android_apk.is_file(),
         "health": {"connected": profile.health_token_hash is not None,
                    "last_day": last_activity.isoformat() if last_activity else None},
         "notify": {

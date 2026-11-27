@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
@@ -63,6 +63,15 @@ def asset_links():
         "target": {"namespace": "android_app", "package_name": settings.android_package,
                    "sha256_cert_fingerprints": prints},
     }]
+
+
+# Open to anyone with the link, so it can be forwarded: the APK is only a shell around the sign-in page.
+@app.get("/app.apk", include_in_schema=False)
+def android_apk():
+    if not settings.android_apk.is_file():
+        raise HTTPException(status_code=404)
+    return FileResponse(settings.android_apk, media_type="application/vnd.android.package-archive",
+                        filename="kbju.apk", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/healthz", include_in_schema=False)

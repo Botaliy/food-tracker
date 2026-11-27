@@ -80,7 +80,7 @@ docker compose exec food-tracker python -m scripts.vapid
 
 На Android приложение ставится и без APK: Chrome → «Установить приложение». APK нужен, чтобы просто переслать файл. Это Trusted Web Activity — оболочка на 1 МБ, которая открывает сайт через Chrome без адресной строки, так что обновления сайта приходят сами и пересобирать APK не надо. Нужен Android 7+ и Chrome.
 
-Рецепт сборки — `android/twa-manifest.json`. Ключ подписи `android/release.keystore` и пароль `android/keystore-password.txt` в git не попадают: **сохрани их отдельно**, без этого ключа новую версию APK нельзя поставить поверх старой.
+Рецепт сборки — `android/twa-manifest.json`. Ключ подписи `android/release.keystore` и пароль `android/keystore-password.txt` в git не попадают (репозиторий публичный), копия лежит на сервере в `data/android-key/`. Без этого ключа новую версию APK нельзя поставить поверх старой.
 
 Сборка (нужны JDK 17 и Android SDK, пути к ним — в `~/.bubblewrap/config.json`):
 
@@ -88,6 +88,12 @@ docker compose exec food-tracker python -m scripts.vapid
 cd android && npm ci
 export BUBBLEWRAP_KEYSTORE_PASSWORD="$(cat keystore-password.txt)" BUBBLEWRAP_KEY_PASSWORD="$BUBBLEWRAP_KEYSTORE_PASSWORD"
 npm run build        # → app-release-signed.apk
+```
+
+Скачивание из приложения: файл, положенный на сервере в `data/android/kbju.apk`, отдаётся по `/app.apk` без входа, а в профиле появляется строка «Приложение для Android» (на Android скачивает, на остальных устройствах делится ссылкой). Деплой для замены файла не нужен:
+
+```bash
+scp android/app-release-signed.apk de-vpn:/root/food-tracker/data/android/kbju.apk
 ```
 
 Адресную строку Chrome убирает, только если сайт подтверждает APK: в `.env` на сервере должны быть `ANDROID_PACKAGE` (как `packageId` в рецепте) и `ANDROID_CERT_SHA256` (отпечаток ключа: `keytool -list -v -keystore android/release.keystore`), они отдаются в `/.well-known/assetlinks.json`.

@@ -57,6 +57,11 @@ class Settings(BaseSettings):
         return (BASE_DIR / self.db_path).resolve().parent
 
     @property
+    def android_apk(self) -> Path:
+        """The APK offered in the profile (GET /app.apk). Copied here by hand after a build; absent = no link."""
+        return self.data_dir / "android" / "kbju.apk"
+
+    @property
     def db_url(self) -> str:
         db_file = (BASE_DIR / self.db_path).resolve()
         db_file.parent.mkdir(parents=True, exist_ok=True)
