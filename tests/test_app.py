@@ -554,8 +554,8 @@ def test_shared_streaks_are_opt_in(client, db):
         other.post("/api/meals", json={"items": [{"name": "x", "grams": 10, "kcal_100": 1, "protein_100": 0, "fat_100": 0, "carbs_100": 0}]})
         people = other.get("/api/streaks").json()["people"]
     assert people == [  # longest first; on a tie, you first
-        {"name": "alina", "streak": 1, "today": True, "me": True},
-        {"name": "admin", "streak": 1, "today": False, "me": False},
+        {"name": "alina", "streak": 1, "today": True, "me": True, "guess": None},
+        {"name": "admin", "streak": 1, "today": False, "me": False, "guess": None},
     ]
 
 

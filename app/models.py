@@ -105,6 +105,8 @@ class Meal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     # File name of the thumbnail in <data dir>/photos (app.photos); None = no photo.
     photo: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # «Угадай калории»: what the user said the plate holds before the recognition answered.
+    guess_kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     items: Mapped[list["MealItem"]] = relationship(
         back_populates="meal", cascade="all, delete-orphan", order_by="MealItem.id"

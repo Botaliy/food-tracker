@@ -621,8 +621,10 @@ function openStreak() {
         ${freeze}
         ${line(ICONS.target, `${days(st.in_goal)} в норме`, "Подряд в коридоре 85–105% нормы")}
         ${line(ICONS.dumbbell, `${days(st.protein)} с белком`, "Подряд с белком от 90% нормы")}
+        ${st.guess ? line(ICONS.camera, `Глазомер: промах ${st.guess.off_percent}%`, `Обычный промах в «Угадай калории» за неделю, ${st.guess.n} ${plural(st.guess.n, "тарелка", "тарелки", "тарелок")}`) : ""}
       </ul>
     </div>
+    ${guessRow(state.streaks)}
     ${streaksRow(state.streaks) || '<p class="muted small">Общие серии с друзьями включаются в «Профиль → Уведомления».</p>'}`);
 }
 
@@ -635,6 +637,14 @@ function celebrate(st) {
     localStorage.setItem(key, String(st.days));
   } catch { return; }
   setTimeout(() => toast(`${st.days} ${plural(st.days, "день", "дня", "дней")} подряд! Так держать`), 400);
+}
+
+// «Угадай калории» among those who share streaks: the smallest usual miss first.
+function guessRow(st) {
+  const people = (st?.joined ? st.people : []).filter((p) => p.guess).sort((a, b) => a.guess.off_percent - b.guess.off_percent);
+  if (!people.some((p) => !p.me)) return "";
+  return `<div class="streaks"><span class="streaks-title">Глазомер за неделю</span>${people.map((p) =>
+    `<span class="chip ${p.me ? "me" : ""}" title="${p.guess.n} ${plural(p.guess.n, "тарелка", "тарелки", "тарелок")}">${esc(p.me ? "ты" : p.name)} <b>${p.guess.off_percent}%</b></span>`).join("")}</div>`;
 }
 
 // Shared streaks. On the day screen only when someone besides me takes part.
@@ -1238,6 +1248,37 @@ sheetBody.addEventListener("input", (e) => {
   if (e.target.id === "add-q") searchFoodsInto(e.target.value, "#add-results", "add");
 });
 
+// «Угадай калории»: a guess typed while the photo is being recognized, compared with the result.
+const GUESS_FORM = `<form class="guess" id="guess-form">
+    <label for="guess-kcal">Пока жду — угадай, сколько здесь ккал</label>
+    <div class="row"><input id="guess-kcal" type="number" inputmode="numeric" pattern="[0-9]*" min="1" max="10000" placeholder="например, 550" autocomplete="off">
+    <button class="primary" id="guess-go" hidden>Проверить</button></div>
+    <button type="button" class="ghost small" id="guess-skip" hidden>Пропустить</button>
+  </form>`;
+const GUESS_WAIT_MS = 20000;
+
+// The answer is here. A guess still being typed gets a moment to be finished; an untouched field is skipped.
+function settleGuess(input) {
+  const value = () => { const n = Math.round(Number(input.value)); return n >= 1 && n <= 10000 ? n : null; };
+  if (document.activeElement !== input) return Promise.resolve(value());
+  $("#rec-spinner").hidden = true;
+  $("#rec-status").textContent = "Готово. Твоя догадка?";
+  $("#guess-go").hidden = $("#guess-skip").hidden = false;
+  return new Promise((done) => {
+    const timer = setTimeout(() => done(value()), GUESS_WAIT_MS);
+    const end = (v) => { clearTimeout(timer); done(v); };
+    $("#guess-form").onsubmit = (e) => { e.preventDefault(); end(value()); };
+    $("#guess-skip").onclick = () => end(null);
+  });
+}
+
+const guessOff = (guess, kcal) => Math.round((Math.abs(guess - kcal) / kcal) * 100);
+function guessVerdict(guess, kcal) {
+  if (!(kcal > 0)) return "";
+  const off = guessOff(guess, kcal);
+  return `Твоя догадка ${r0(guess)} ккал — ${off <= 10 ? "в точку" : off <= 25 ? "близко" : "мимо"}, промах ${off}%`;
+}
+
 let addResults = [];
 async function recognizeNow() {
   const note = $("#note")?.value.trim() || "";
@@ -1246,7 +1287,8 @@ async function recognizeNow() {
   if (pendingPhoto) form.append("photo", pendingPhoto, "meal.jpg");
   form.append("note", note);
   stopVoice(true);
-  sheetBody.innerHTML = '<div class="spinner"></div><p class="center muted">Смотрю на тарелку…</p>';
+  sheetBody.innerHTML = `<div class="spinner" id="rec-spinner"></div><p class="center muted" id="rec-status">Смотрю на тарелку…</p>${pendingPhoto ? GUESS_FORM : ""}`;
+  const guessInput = $("#guess-kcal");
   try {
     const d = await api("/api/recognize", { method: "POST", form });
     if (state.me) state.me.spent_today = d.spent_today;
@@ -1254,6 +1296,11 @@ async function recognizeNow() {
       openAdd();
       $("#add-error").textContent = d.comment || "Не нашёл еды на фото";
       return;
+    }
+    if (guessInput) {
+      const guess = await settleGuess(guessInput);
+      if (!sheetBody.contains(guessInput)) return; // the sheet was closed while the guess was awaited
+      if (guess) d.guess_kcal = guess;
     }
     openEditor(d);
     if (!d.photo && pendingPhoto) { localPreview = { draft, url: URL.createObjectURL(pendingPhoto) }; renderEditor(); }
@@ -1351,6 +1398,7 @@ function renderEditor() {
     <input id="title" value="${esc(draft.title)}" placeholder="Название (необязательно)">
     ${draft.comment ? `<p class="small muted note">${ICONS.bulb}<span>${esc(draft.comment)}</span></p>` : ""}
     ${draft.personal_hints ? `<p class="small muted note">${ICONS.target}<span>Учтены твои прошлые правки порций</span></p>` : ""}
+    ${draft.guess_kcal ? `<p class="small note guess-note">${ICONS.camera}<span id="guess-note"></span></p>` : ""}
     <div class="card" style="margin-top:10px" id="items">${draft.items.map(itemHtml).join("") || '<p class="muted small">Добавь продукты через поиск ниже</p>'}</div>
     <div class="card">
       <input id="food-q" placeholder="Добавить продукт: поиск (рус./англ.)" autocomplete="off">
@@ -1370,6 +1418,8 @@ function updateDraftTotals() {
   const t = totalsOf(draft.items);
   $("#draft-total").textContent = `${r0(t.kcal)} ккал`;
   $("#draft-macros").textContent = `Б ${r0(t.protein)} · Ж ${r0(t.fat)} · У ${r0(t.carbs)}`;
+  const note = $("#guess-note");
+  if (note) note.textContent = guessVerdict(draft.guess_kcal, t.kcal);
 }
 
 // The item list (itemHtml) is shared by the meal editor and the dish editor: one of them is open.
@@ -1497,6 +1547,7 @@ async function saveDraft(btn) {
   };
   // Sent only when there is one: an edit without "photo" keeps the meal's own.
   if (draft.photo) body.photo = draft.photo;
+  if (!draft.id && draft.guess_kcal) body.guess_kcal = draft.guess_kcal;
   // The day the meal belongs to (the viewed day for a new one) at the time in the editor.
   body.eaten_at = `${draft.day}T${draft.time}:00`;
   try {

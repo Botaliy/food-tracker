@@ -1,6 +1,7 @@
 """Facts about a user's diary that the API and the reminder scheduler both need."""
 
 from collections.abc import Callable
+from statistics import median
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -94,6 +95,24 @@ def streak(db: Session, user: User, on: date) -> tuple[int, bool]:
     return n, on in logged
 
 
+GUESS_DAYS = 7
+GUESS_MIN = 3  # guesses in the week before the score is shown to the others
+
+
+def guess_score(db: Session, user: User, on: date) -> dict | None:
+    """«Угадай калории» over the week up to `on`: how many plates were guessed and the median
+    miss in percent of what was finally logged. None without a guess."""
+    start, _ = usage.day_bounds_utc(user.timezone, on - timedelta(days=GUESS_DAYS - 1))
+    meals = db.scalars(select(Meal).where(Meal.user_id == user.id, Meal.eaten_at >= start, Meal.guess_kcal.is_not(None))
+                       .options(selectinload(Meal.items))).all()
+    misses = []
+    for m in meals:
+        kcal = sum(i.kcal_100 * i.grams / 100 for i in m.items)
+        if kcal > 0:
+            misses.append(abs(m.guess_kcal - kcal) / kcal)
+    return {"n": len(misses), "off_percent": round(median(misses) * 100)} if misses else None
+
+
 def streaks(db: Session, user: User, on: date) -> dict:
     """Everything the day screen shows about runs: logging (with its freeze), in goal, protein."""
     logged = logged_days(db, user, on - timedelta(days=STREAK_LOOKBACK_DAYS))
@@ -112,4 +131,5 @@ def streaks(db: Session, user: User, on: date) -> dict:
         "next_milestone": next((m for m in MILESTONES if m > days), None),
         "in_goal": goal_days,
         "protein": protein_days,
+        "guess": guess_score(db, user, on),
     }

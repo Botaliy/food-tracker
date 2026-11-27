@@ -313,6 +313,10 @@ h3.sub { font-size: 13px; color: var(--muted); font-weight: 600; text-transform:
 .search-results button.with-ico { display: flex; }
 p.note { display: flex; gap: 6px; align-items: flex-start; }
 p.note .ic { width: 16px; height: 16px; margin-top: 1px; }
+.guess { max-width: 320px; margin: 18px auto 8px; text-align: center; }
+.guess .row { gap: 8px; margin-top: 6px; }
+.guess input { text-align: center; }
+.guess #guess-skip { margin-top: 6px; color: var(--muted); }
 
 .spinner { width: 34px; height: 34px; border: 3px solid var(--track); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin: 20px auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -578,3 +582,4 @@ button.link { background: transparent; border: none; color: var(--accent-ink); f
 .net-banner .ic { width: 16px; height: 16px; color: var(--over); }
 .badge.wait { background: var(--over-soft); color: var(--text); }
 .meal.queued { opacity: .85; border-style: dashed; border-color: var(--line); }
+.guess [hidden] { display: none; }

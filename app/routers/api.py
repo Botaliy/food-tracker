@@ -298,6 +298,7 @@ class MealIn(BaseModel):
     eaten_at: datetime | None = None
     items: list[ItemIn] = Field(min_length=1, max_length=30)
     photo: str | None = Field(None, max_length=64)  # a name from /api/recognize
+    guess_kcal: float | None = Field(None, ge=1, le=10000)  # new meals only: a guess can't be made afterwards
 
 
 def _to_utc(dt: datetime | None, tz: str) -> datetime:
@@ -364,6 +365,7 @@ def _meal_dict(meal: Meal, tz: str) -> dict:
         ],
         "totals": _totals(meal.items),
         "photo": meal.photo,
+        "guess_kcal": meal.guess_kcal,
     }
 
 
@@ -376,7 +378,8 @@ def _own_meal(db: Session, meal_id: int, user: User) -> Meal:
 
 def _new_meal(db: Session, user: User, body: MealIn) -> Meal:
     """A new meal, flushed but not committed: the caller owns the transaction."""
-    meal = Meal(user_id=user.id, title=body.title.strip(), eaten_at=_to_utc(body.eaten_at, user.timezone))
+    meal = Meal(user_id=user.id, title=body.title.strip(), eaten_at=_to_utc(body.eaten_at, user.timezone),
+                guess_kcal=body.guess_kcal)
     meal.items = [_item(db, i, user) for i in body.items]
     # A photo that is gone (cleaned up overnight) or taken just doesn't attach: the meal still saves.
     if photos.claimable(db, body.photo):
@@ -1313,7 +1316,10 @@ def streaks(user: User = Depends(auth.current_user), db: Session = Depends(get_d
     people = []
     for u in db.scalars(select(User).join(Profile, Profile.user_id == User.id).where(Profile.share_streak.is_(True))):
         n, today_logged = diary.streak(db, u, diary.today(u))
-        people.append({"name": u.username, "streak": n, "today": today_logged, "me": u.id == user.id})
+        guess = diary.guess_score(db, u, diary.today(u))
+        people.append({"name": u.username, "streak": n, "today": today_logged, "me": u.id == user.id,
+                       # A couple of lucky plates is not a score yet.
+                       "guess": guess if guess and guess["n"] >= diary.GUESS_MIN else None})
     people.sort(key=lambda p: (-p["streak"], not p["me"], p["name"]))
     return {"joined": True, "people": people}
 
