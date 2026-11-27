@@ -1085,7 +1085,7 @@ def test_export_zip(client, db):
     assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
     assert f'filename="food-tracker-{today}.zip"' in r.headers["content-disposition"]
     zf = zipfile.ZipFile(io.BytesIO(r.content))
-    assert sorted(zf.namelist()) == ["activity.csv", "meals.csv", "water.csv", "weights.csv"]
+    assert sorted(zf.namelist()) == ["activity.csv", "meals.csv", "water.csv", "weights.csv", "workouts.csv"]
     raw = zf.read("meals.csv")
     assert raw.startswith(b"\xef\xbb\xbf")
     rows = list(csv.reader(io.StringIO(raw.decode("utf-8-sig"))))
@@ -1146,3 +1146,10 @@ def test_android_apk_is_offered_once_the_file_is_there(client):
         assert 'filename="kbju.apk"' in r.headers["content-disposition"]
     finally:
         apk.unlink()
+
+
+def test_static_files_are_revalidated(client):
+    r = client.get("/static/style.css")
+    assert r.status_code == 200 and r.headers["cache-control"] == "no-cache"
+    again = client.get("/static/style.css", headers={"If-None-Match": r.headers["etag"]})
+    assert again.status_code == 304 and again.headers["cache-control"] == "no-cache"

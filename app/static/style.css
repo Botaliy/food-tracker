@@ -174,6 +174,13 @@ label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px
 .nut-item b { font-weight: 600; color: var(--text); }
 .nut-item.over b { color: var(--over); }
 .summary .nut + .move { margin-top: 12px; }
+/* workouts: compact rows under movement, sharing its divider when both show */
+.workouts { margin-top: 16px; padding-top: 8px; border-top: 1px solid var(--line); font-size: 14px; color: var(--text); }
+.move + .workouts { margin-top: 4px; padding-top: 0; border-top: 0; }
+.wk { display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.wk .move-ico { color: var(--accent); display: grid; }
+.wk-del { width: 36px; height: 36px; padding: 0; flex: none; display: grid; place-items: center; color: var(--muted); }
+.wk-del .ic { width: 18px; height: 18px; }
 /* bars: averages on the reports screen */
 .card:not(.summary) .macro { align-items: stretch; gap: 0; }
 .card:not(.summary) .macro b { display: block; font-size: 15px; }
@@ -501,6 +508,16 @@ ul.insights li .muted.small { display: block; margin-top: 1px; }
 }
 .composer textarea { min-height: 44px; max-height: 140px; resize: none; border-radius: 22px; padding: 11px 16px; }
 .composer button { width: 44px; height: 44px; flex: none; border-radius: 50%; padding: 0; display: grid; place-items: center; }
+.composer label.icon-pick { background: var(--card); color: var(--muted); }
+/* the attached screenshot floats just above the input, so the row keeps its height */
+#coach-attach { position: absolute; left: 12px; bottom: 100%; }
+.attach-chip { gap: 8px; padding: 4px; }
+.attach-chip img { width: 32px; height: 32px; object-fit: cover; border-radius: 8px; }
+.composer .attach-chip button { width: 32px; height: 32px; color: var(--muted); }
+.attach-chip .ic { width: 16px; height: 16px; }
+.bubble-img { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; opacity: .85; margin-bottom: 4px; }
+.bubble-img .ic { width: 15px; height: 15px; }
+.bubble-img:only-child { margin-bottom: 0; }
 #coach-error { text-align: center; }
 
 /* own dishes */

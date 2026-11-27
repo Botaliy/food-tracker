@@ -1,14 +1,16 @@
 """A chat with an AI coach that knows the user's diary.
 
 Every message goes with a fresh snapshot of the user's data (goals, today, the last 7
-days, weight trend, streaks), so answers are about this person, not generic advice.
+days, workouts, weight trend, streaks), so answers are about this person, not generic advice.
 Bounded by a daily message cap per user and by the same $ limits as recognition.
 
 The coach never writes to the diary. It may answer with tool calls (TOOLS): those are
 proposals the app shows as cards, and only the user's tap applies one (app.routers.api).
 One model call per message: a tool call ends the turn, there is no tool loop.
+A message may carry a screenshot (a watch app, a plate): it goes to the model once and is not kept.
 """
 
+import base64
 import json
 import logging
 from dataclasses import dataclass, field
@@ -20,7 +22,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from app import diary, energy, foods, review, usage
 from app.config import get_settings
-from app.models import Activity, ChatMessage, Meal, Profile, User, Water, Weight
+from app.models import Activity, ChatMessage, Meal, Profile, User, Water, Weight, Workout
 from app.recognize import RecognizeError as CoachError
 from app.recognize import RecognizeErrorWithResponse as CoachErrorWithResponse
 from app.recognize import _client
@@ -32,7 +34,7 @@ MAX_MESSAGE_CHARS = 2000
 
 SYSTEM = """Ты — коуч по питанию и здоровым привычкам внутри личного трекера калорий. Общаешься по-русски, на «ты», дружелюбно и по делу.
 
-Перед каждым сообщением приложение даёт свежие данные пользователя: норму, профиль, что съедено сегодня, сводку за 7 дней, вес и его сглаженный тренд, серии, воду и активность. Опирайся на них и называй цифры, когда это помогает. Дни без записей — пропуски в дневнике, а не голодание. Клетчатка, сахар и соль (fiber, sugar, salt в граммах) известны не для всех продуктов — это нижняя оценка, null значит «нет данных»; ориентиры в reference_per_day (клетчатка 14 г на 1000 ккал, соль до 5 г). Сахар — весь сахар, включая фруктовый и молочный, а не только добавленный; не ругай за него, если это фрукты и молочное.
+Перед каждым сообщением приложение даёт свежие данные пользователя: норму, профиль, что съедено сегодня, сводку за 7 дней, вес и его сглаженный тренд, серии, воду, активность и тренировки за 7 дней (workouts_last_7_days). Опирайся на них и называй цифры, когда это помогает. Дни без записей — пропуски в дневнике, а не голодание. Клетчатка, сахар и соль (fiber, sugar, salt в граммах) известны не для всех продуктов — это нижняя оценка, null значит «нет данных»; ориентиры в reference_per_day (клетчатка 14 г на 1000 ккал, соль до 5 г). Сахар — весь сахар, включая фруктовый и молочный, а не только добавленный; не ругай за него, если это фрукты и молочное. Дневные active_kcal с часов уже включают тренировки — не складывай их.
 
 Как отвечать:
 - Коротко: обычно 2–6 предложений или короткий список. Длиннее — только если просят план или разбор.
@@ -42,12 +44,16 @@ SYSTEM = """Ты — коуч по питанию и здоровым привы
 - Можно использовать **жирный** и списки с «- ». Без заголовков и таблиц.
 
 Записи в дневник:
-- Когда просят записать еду, воду или вес, поменять норму или явно соглашаются на твоё предложение («да, запиши») — вызови инструмент (log_meal, add_water, log_weight, set_goals), а не описывай запись словами.
+- Когда просят записать еду, воду, вес, тренировку или активность, поменять норму или явно соглашаются на твоё предложение («да, запиши») — вызови инструмент (log_meal, add_water, log_weight, set_goals, log_workout, log_activity), а не описывай запись словами.
 - Ничего не сохраняется, пока пользователь не нажмёт «Записать» на карточке под твоим ответом. Поэтому никогда не пиши «записал» или «готово» — скажи коротко, что карточка ниже и её нужно подтвердить.
 - log_meal: раздели еду на продукты с граммами, как она съедена (приготовленный вес); названия по-русски и по-английски в терминах базы USDA; цифры на 100 г — твоя оценка, их сверят с базой. time — «ЧЧ:ММ», только если время названо или очевидно, иначе пустая строка.
 - set_goals: считай от реального расхода (expenditure: по дневнику и весу, по формуле) и активности из данных, не от общих норм; не ниже 1200 ккал; в reason — одно короткое предложение, почему так.
+- Тренировка словами («пробежал 5 км за 30 минут») или скриншот из приложения часов (Huawei Health, Garmin, Strava, Apple Fitness…): возьми цифры и предложи log_workout для тренировки и log_activity для итогов дня (шаги, активные ккал). Не придумывай цифр, которых нет в тексте или на скриншоте — неизвестное это 0. Если ккал тренировки не видны, можно оценить по виду, длительности и весу, но скажи, что это оценка.
+- Фото еды в чате — log_meal, как обычно.
 - Не предлагай записей, о которых не просили: если хочешь что-то предложить сам, спроси в тексте, а инструмент вызывай после согласия.
 - Строки вида «[предложено: … — записано / отклонено / ждёт подтверждения]» в истории — это что стало с твоими прошлыми карточками.
+
+Нагрузка: советы о тренировках связывай с дневником — хватает ли белка, какой дефицит, куда идёт вес.
 
 Границы: ты не врач. Не ставь диагнозов, не назначай лекарства и добавки, не советуй голодание и диеты ниже 1200 ккал. При симптомах, расстройствах пищевого поведения, беременности или хронических болезнях мягко советуй обратиться к врачу. Вопросы не про питание, вес, движение, сон и привычки вежливо возвращай к теме."""
 
@@ -100,6 +106,18 @@ TOOLS = [
     _tool("log_weight", "Предложить записать вес за сегодня.", {
         "kg": {"type": "number", "description": "Вес в килограммах."},
     }),
+    _tool("log_workout", "Предложить записать тренировку за сегодня. Неизвестное — 0 или пустая строка.", {
+        "kind": {"type": "string", "description": "Вид по-русски, коротко: «Бег», «Силовая», «Велосипед»."},
+        "minutes": {"type": "integer", "description": "Длительность в минутах, больше нуля."},
+        "kcal": {"type": "number", "description": "Ккал за тренировку, 0 — неизвестно."},
+        "distance_km": {"type": "number", "description": "Дистанция в км, 0 — нет или неизвестно."},
+        "avg_hr": {"type": "integer", "description": "Средний пульс, уд/мин, 0 — неизвестно."},
+        "time": {"type": "string", "description": "Начало, местное время «ЧЧ:ММ», или пустая строка."},
+    }),
+    _tool("log_activity", "Предложить записать итоги дня с часов за сегодня: шаги и активные ккал. 0 — неизвестно.", {
+        "steps": {"type": "integer", "description": "Шаги за день, 0 — неизвестно."},
+        "active_kcal": {"type": "number", "description": "Активные ккал за день, 0 — неизвестно."},
+    }),
 ]
 
 
@@ -129,13 +147,34 @@ def action_line(action: dict) -> str:
         what = f"изменить норму на {p['kcal']} ккал (Б {p['protein']} · Ж {p['fat']} · У {p['carbs']})"
     elif kind == "add_water":
         what = f"добавить воду {p['ml']} мл"
+    elif kind == "log_weight":
+        what = f"записать вес {_num(p['kg'])} кг"
+    elif kind == "log_workout":
+        parts = [p["kind"], f"{p['minutes']} мин"]
+        parts += [f"{_num(p['distance_km'])} км"] if p.get("distance_km") else []
+        parts += [f"{round(p['kcal'])} ккал"] if p.get("kcal") else []
+        parts += [f"пульс {p['avg_hr']}"] if p.get("avg_hr") else []
+        what = "записать тренировку: " + ", ".join(parts)
+    elif kind == "log_activity":
+        parts = [f"{p['steps']} шагов"] if p.get("steps") else []
+        parts += [f"{round(p['active_kcal'])} активных ккал"] if p.get("active_kcal") else []
+        what = "записать активность за день: " + ", ".join(parts)
     else:
-        what = f"записать вес {str(p['kg']).replace('.', ',')} кг"
+        what = kind
     return f"[предложено: {what} — {_STATUS_WORD.get(action['status'], action['status'])}]"
 
 
+def _num(x) -> str:
+    return f"{x:g}".replace(".", ",")  # 5.0 -> "5", 72.4 -> "72,4"
+
+
+IMAGE_NOTE = "[к сообщению был приложен скриншот — в истории его нет]"
+
+
 def model_content(m: ChatMessage) -> str:
-    if m.role != "assistant" or not m.actions:
+    if m.role == "user":
+        return f"{m.content}\n{IMAGE_NOTE}" if m.has_image else m.content
+    if not m.actions:
         return m.content
     try:
         lines = [action_line(a) for a in json.loads(m.actions)]
@@ -163,6 +202,8 @@ def snapshot(db: Session, user: User) -> dict:
     weights = db.scalars(select(Weight).where(Weight.user_id == user.id, Weight.day >= today - timedelta(days=90))
                          .order_by(Weight.day)).all()
     activity = db.scalars(select(Activity).where(Activity.user_id == user.id, Activity.day >= first)).all()
+    workouts = db.scalars(select(Workout).where(Workout.user_id == user.id, Workout.day >= first)
+                          .order_by(Workout.day, Workout.started, Workout.id)).all()
     goals = {"kcal": user.kcal_goal, "protein": user.protein_goal, "fat": user.fat_goal, "carbs": user.carbs_goal}
     week = review.build_digest(meals, [w for w in weights if w.day >= first], goals, user.timezone, today, activity)
 
@@ -199,6 +240,8 @@ def snapshot(db: Session, user: User) -> dict:
         "weight": energy.weight_outlook([(w.day, w.kg) for w in weights],
                                         profile.goal_weight_kg if profile else None, today),
         "streaks": diary.streaks(db, user, today),
+        "workouts_last_7_days": [{"date": w.day.isoformat(), "time": w.started, "kind": w.kind, "minutes": w.minutes,
+                                  "kcal": w.kcal, "distance_km": w.distance_km, "avg_hr": w.avg_hr} for w in workouts],
     }
 
 
@@ -209,15 +252,23 @@ def history(db: Session, user: User, limit: int) -> list[ChatMessage]:
 
 
 def ask(db: Session, user: User, text: str, client: anthropic.Anthropic | None = None,
-        extra: dict | None = None) -> CoachReply:
-    """`extra` joins the snapshot: data the API layer computes (expenditure)."""
+        extra: dict | None = None, image: bytes | None = None) -> CoachReply:
+    """`extra` joins the snapshot: data the API layer computes (expenditure). `image`: a JPEG
+    for this message only; later turns see just a note that there was one."""
     settings = get_settings()
     past = history(db, user, HISTORY_MESSAGES)
     messages = [{"role": m.role, "content": model_content(m)} for m in past]
     # The API wants the first message from the user.
     while messages and messages[0]["role"] != "user":
         messages.pop(0)
-    messages.append({"role": "user", "content": text})
+    if image is None:
+        messages.append({"role": "user", "content": text})
+    else:
+        messages.append({"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": base64.b64encode(image).decode("ascii")}},
+            {"type": "text", "text": text},
+        ]})
     data = json.dumps({**snapshot(db, user), **(extra or {})}, ensure_ascii=False, default=str)
     kwargs: dict = {
         "model": settings.coach_model,

@@ -61,7 +61,7 @@ def test_tools_are_strict_and_sent(client, coach_says):
     fake = coach_says(tool_response("Карточка ниже.", OMELETTE))
     ask(client)
     tools = {t["name"]: t for t in fake.kwargs["tools"]}
-    assert set(tools) == {"log_meal", "set_goals", "add_water", "log_weight"}
+    assert set(tools) == {"log_meal", "set_goals", "add_water", "log_weight", "log_workout", "log_activity"}
     for t in tools.values():
         assert t["strict"] is True and t["input_schema"]["additionalProperties"] is False
     assert "expenditure" in json.loads(fake.kwargs["system"][1]["text"].split("\n", 1)[1])

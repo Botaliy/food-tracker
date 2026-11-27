@@ -474,6 +474,7 @@ function renderDay() {
       </div>
       ${nutrientLine(t, state.dayData.refs)}
       ${activityLine(state.dayData.activity)}
+      ${workoutLines(state.dayData.workouts || [])}
     </div>
     ${isToday ? quickTiles(state.dayData) : ""}
     ${meals.length
@@ -668,6 +669,27 @@ function activityLine(a) {
   </div>`;
 }
 
+// Workouts confirmed in the coach chat, under the movement line. Read-only offline: never queued.
+// Each value stays whole (a no-break space before its unit); lines wrap only between them.
+const workoutText = (w) => [esc(w.kind), `${r0(w.minutes)}\u00a0мин`, w.distance_km != null && `${gFmt(w.distance_km)}\u00a0км`,
+  w.kcal != null && `${fmtInt(w.kcal)}\u00a0ккал`, w.avg_hr != null && `пульс\u00a0${r0(w.avg_hr)}`].filter(Boolean).join(" · ");
+function workoutLines(list) {
+  if (!list.length) return "";
+  return `<div class="workouts" aria-label="Тренировки">${list.map((w) => `<div class="wk">
+    <span class="move-ico">${ICONS.dumbbell}</span>
+    <span class="grow">${w.time ? `<span class="muted">${esc(w.time)}</span> ` : ""}${workoutText(w)}</span>
+    <button class="ghost wk-del" data-workout-del="${w.id}" aria-label="Удалить тренировку">${ICONS.trash}</button>
+  </div>`).join("")}</div>`;
+}
+
+async function deleteWorkout(id) {
+  if (!confirm("Удалить эту тренировку?")) return;
+  try {
+    await api(`/api/workouts/${id}`, { method: "DELETE" });
+    loadDay();
+  } catch (err) { toast(err.message); }
+}
+
 const PART_OF_DAY = [[5, "moon", "Перекус"], [11, "cup", "Завтрак"], [16, "bowl", "Обед"], [22, "plate", "Ужин"], [24, "apple", "Перекус"]];
 
 // The card slides over a delete button: swipe left reveals it, the editor keeps its own.
@@ -791,6 +813,8 @@ app.addEventListener("click", (e) => {
   const mealEl = e.target.closest("[data-meal]");
   const sug = e.target.closest("[data-suggest]");
   const del = e.target.closest("[data-meal-del]");
+  const wdel = e.target.closest("[data-workout-del]");
+  if (wdel) return deleteWorkout(Number(wdel.dataset.workoutDel));
   if (sug) return repeatMeal(state.dayData.suggest[Number(sug.dataset.suggest)]);
   if (del) return deleteMeal(Number(del.dataset.mealDel)).then((done) => { if (!done) closeOpenMeal(); });
   if (mealEl?.dataset.swiped) return;
@@ -2063,7 +2087,7 @@ function renderProfileList(me, p) {
 
 // ---------- coach ----------
 
-const COACH_STARTERS = ["Что съесть на ужин, чтобы добрать белок?", "Оцени мой сегодняшний день", "Запиши: омлет из 3 яиц и кофе с молоком",
+const COACH_STARTERS = ["Что съесть на ужин, чтобы добрать белок?", "Оцени мой сегодняшний день", "Запиши: омлет из 3 яиц и кофе с молоком", "Запиши тренировку: 40 минут в зале",
   "Почему вес стоит на месте?", "Как мне меньше есть вечером?"];
 
 // What the coach proposes to write: a card under its reply; nothing is saved until the tap.
@@ -2072,6 +2096,8 @@ const ACTION_UI = {
   set_goals: { icon: "target", title: "Изменить норму" },
   add_water: { icon: "drop", title: "Добавить воду" },
   log_weight: { icon: "scale", title: "Записать вес" },
+  log_workout: { icon: "dumbbell", title: "Записать тренировку" },
+  log_activity: { icon: "steps", title: "Записать активность" },
 };
 
 function actionBody(a) {
@@ -2087,7 +2113,19 @@ function actionBody(a) {
       ${s.reason ? `<p class="small muted act-reason">${esc(s.reason)}</p>` : ""}`;
   }
   if (a.type === "add_water") return `<div class="act-total"><b>+${r0(s.ml)} мл</b></div>`;
-  return `<div class="act-total"><b>${kgFmt(s.kg)} кг</b></div>`;
+  if (a.type === "log_weight") return `<div class="act-total"><b>${kgFmt(s.kg)} кг</b></div>`;
+  if (a.type === "log_workout") {
+    const rest = [s.distance_km != null && `${gFmt(s.distance_km)} км`, s.kcal != null && `${fmtInt(s.kcal)} ккал`,
+      s.avg_hr != null && `пульс ${r0(s.avg_hr)}`].filter(Boolean);
+    return `<div class="act-sub">${esc(s.kind)}${s.time ? ` · ${esc(s.time)}` : ""}</div>
+      <div class="act-total"><b>${r0(s.minutes)} мин</b>${rest.map((x) => ` · ${x}`).join("")}</div>`;
+  }
+  if (a.type === "log_activity") {
+    return `<div class="act-total">${[
+      s.steps != null && `<b>${fmtInt(s.steps)}</b> ${plural(r0(s.steps), "шаг", "шага", "шагов")}`,
+      s.active_kcal != null && `<b>${fmtInt(s.active_kcal)}</b> ккал активности`].filter(Boolean).join(" · ")}</div>`;
+  }
+  return "";
 }
 
 function actionCard(m, a) {
@@ -2162,25 +2200,60 @@ async function loadCoach() {
   renderCoach();
 }
 
-function renderCoach(pending = "") {
+// A screenshot to go with the next message: shrunk on the phone, sent once, never kept on the server.
+let coachImage = null; // { data: data: URL, url: object URL for the preview }
+const MAX_COACH_IMAGE = 2_400_000; // the server takes up to 2.5 MB of base64
+
+function dropCoachImage() {
+  if (coachImage) URL.revokeObjectURL(coachImage.url);
+  coachImage = null;
+}
+
+const attachChip = () => coachImage
+  ? `<span class="chip attach-chip"><img src="${coachImage.url}" alt="">Скриншот
+      <button type="button" class="ghost" data-attach-drop aria-label="Убрать скриншот">${ICONS.close}</button></span>` : "";
+
+const imageMark = `<span class="bubble-img">${ICONS.image}скриншот</span>`;
+const userBubble = (text, hasImage) => `<div class="bubble user">${hasImage ? imageMark : ""}${text ? `<p>${esc(text)}</p>` : ""}</div>`;
+
+async function attachCoachImage(file) {
+  const blob = await shrinkPhoto(file);
+  const data = await new Promise((ok, fail) => {
+    const r = new FileReader();
+    r.onload = () => ok(r.result);
+    r.onerror = () => fail(r.error);
+    r.readAsDataURL(blob);
+  }).catch(() => null);
+  if (!data || data.length > MAX_COACH_IMAGE) return toast(data ? "Картинка слишком большая" : "Не получилось прочитать картинку");
+  dropCoachImage();
+  coachImage = { data, url: URL.createObjectURL(blob) };
+  const slot = $("#coach-attach");
+  if (slot) slot.innerHTML = attachChip();
+}
+
+// pending: the message on its way, { text, image }.
+function renderCoach(pending = null) {
   stopVoice(true);
   const c = state.coach;
   const left = Math.max(0, c.per_day - c.used_today);
-  const bubbles = c.messages.map((m) => `<div class="bubble ${m.role}">${m.role === "assistant" ? coachHtml(m.text) : `<p>${esc(m.text)}</p>`}</div>`
+  const open = left && !pending;
+  const bubbles = c.messages.map((m) => (m.role === "assistant" ? `<div class="bubble assistant">${coachHtml(m.text)}</div>` : userBubble(m.text, m.has_image))
     + (m.actions || []).map((a) => actionCard(m, a)).join("")).join("");
   app.innerHTML = `
     ${topbar("Коуч", left ? `осталось ${left} ${plural(left, "сообщение", "сообщения", "сообщений")} сегодня` : "сообщения на сегодня закончились",
       c.messages.length ? `<button class="icon" data-act="coach-clear" aria-label="Очистить чат">${ICONS.trash}</button>` : "")}
     <div class="chat" id="chat">
       ${c.messages.length ? bubbles : `<div class="empty"><div class="empty-ico">${ICONS.chat}</div><b>Спроси что угодно о питании</b>
-        <p>Коуч видит твой дневник: норму, что съедено сегодня, неделю, вес и серии.</p></div>
+        <p>Коуч видит твой дневник: норму, что съедено сегодня, неделю, вес, тренировки и серии. Можно приложить скриншот тренировки из приложения часов — он предложит её записать.</p></div>
         <div class="starters">${COACH_STARTERS.map((q, j) => `<button class="chip" data-starter="${j}">${esc(q)}</button>`).join("")}</div>`}
-      ${pending ? `<div class="bubble user"><p>${esc(pending)}</p></div><div class="bubble assistant typing"><i></i><i></i><i></i></div>` : ""}
+      ${pending ? `${userBubble(pending.text, pending.image)}<div class="bubble assistant typing"><i></i><i></i><i></i></div>` : ""}
     </div>
     <form class="composer" id="coach-form">
-      <textarea id="coach-text" rows="1" placeholder="${left ? "Напиши коучу…" : "Продолжим завтра"}" ${left && !pending ? "" : "disabled"} maxlength="2000"></textarea>
-      ${left && !pending ? micButton("coach-text") : ""}
-      <button class="primary" ${left && !pending ? "" : "disabled"} aria-label="Отправить">${ICONS.up}</button>
+      <div id="coach-attach">${open ? attachChip() : ""}</div>
+      ${open ? `<label class="btn icon-pick" aria-label="Приложить скриншот">${ICONS.image}<input type="file" accept="image/*" id="coach-file"></label>` : ""}
+      <textarea id="coach-text" rows="1" placeholder="${left ? "Напиши коучу…" : "Продолжим завтра"}" ${open ? "" : "disabled"} maxlength="2000"></textarea>
+      ${open ? micButton("coach-text") : ""}
+      <button class="primary" ${open ? "" : "disabled"} aria-label="Отправить">${ICONS.up}</button>
     </form>
     <div id="coach-error" class="error"></div>`;
   window.scrollTo(0, document.body.scrollHeight);
@@ -2188,20 +2261,31 @@ function renderCoach(pending = "") {
   ta.oninput = () => { ta.style.height = "auto"; ta.style.height = Math.min(ta.scrollHeight, 140) + "px"; };
   ta.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(hover: hover)").matches) { e.preventDefault(); $("#coach-form").requestSubmit(); } };
   $("#coach-form").onsubmit = (e) => { e.preventDefault(); sendCoach(ta.value); };
+  const file = $("#coach-file");
+  if (file) file.onchange = () => { if (file.files[0]) attachCoachImage(file.files[0]); file.value = ""; };
+  $("#coach-attach").onclick = (e) => {
+    if (!e.target.closest("[data-attach-drop]")) return;
+    dropCoachImage();
+    $("#coach-attach").innerHTML = "";
+  };
   app.querySelectorAll("[data-starter]").forEach((b) => b.addEventListener("click", () => sendCoach(COACH_STARTERS[Number(b.dataset.starter)])));
 }
 
 async function sendCoach(text) {
   text = text.trim();
-  if (!text) return;
-  renderCoach(text);
+  const image = coachImage;
+  if (!text && !image) return;
+  coachImage = null; // the composer is cleared while the message is on its way; restored if it fails
+  renderCoach({ text, image: !!image });
   try {
-    const r = await api("/api/coach", { method: "POST", json: { text } });
+    const r = await api("/api/coach", { method: "POST", json: image ? { text, image: image.data } : { text } });
+    if (image) URL.revokeObjectURL(image.url);
     state.coach.messages.push(...r.messages);
     state.coach.used_today = r.used_today;
     if (state.me) state.me.spent_today = r.spent_today;
     if (state.view === "coach") renderCoach();
   } catch (err) {
+    if (image && !coachImage) coachImage = image;
     if (state.view !== "coach") return toast(err.message);
     renderCoach();
     $("#coach-text").value = text;

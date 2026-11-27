@@ -38,7 +38,19 @@ app.add_middleware(
 )
 app.include_router(api.router)
 app.include_router(admin.router)
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+class RevalidatedStatic(StaticFiles):
+    """Without Cache-Control a browser guesses how long a file stays fresh, and after a deploy
+    keeps the old style.css next to the new app.js for hours. no-cache = ask every time (a 304)."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", RevalidatedStatic(directory=str(STATIC_DIR)), name="static")
 
 
 # The service worker and manifest live at the root: a worker only controls pages below its own path.

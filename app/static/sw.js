@@ -1,7 +1,7 @@
 // Network first for the shell, with the last good copy as the fallback: without a
 // connection the app still opens, shows the diary it saved last and queues quick
 // writes (app.js). The API is never cached here.
-const CACHE = "food-shell-v21";
+const CACHE = "food-shell-v22";
 const SHELL = ["/", "/static/app.js", "/static/style.css", "/manifest.webmanifest", "/static/icons/icon.svg", "/static/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {

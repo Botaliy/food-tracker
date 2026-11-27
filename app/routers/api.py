@@ -1,3 +1,5 @@
+import base64
+import binascii
 import csv
 import hashlib
 import io
@@ -12,7 +14,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
@@ -24,7 +26,7 @@ from app.database import get_db
 from app.drafts import build_draft, build_recipe_draft, draft_item
 from app.images import release_memory, shrink
 from app.models import (Activity, ChatMessage, Food, Invite, Meal, MealItem, Profile, PushSubscription, RecipeItem, Review, User,
-                        Water, Weight, utcnow)
+                        Water, Weight, Workout, utcnow)
 from app.recognize import RecognizedItem, RecognizeError, RecognizeErrorWithResponse, recognize, recognize_recipe
 
 logger = logging.getLogger(__name__)
@@ -659,6 +661,9 @@ def day(date_: date | None = Query(None, alias="date"), user: User = Depends(aut
         "goals": _me(db, user)["goals"],
         "refs": diary.nutrient_refs(user.kcal_goal),
         "activity": _activity_dict(act),
+        "workouts": [_workout_dict(w) for w in db.scalars(
+            select(Workout).where(Workout.user_id == user.id, Workout.day == the_day)
+            .order_by(Workout.started.is_(None), Workout.started, Workout.id))],
         "streaks": diary.streaks(db, user, _today(user)),
         "weight": _weight_outlook(db, user),
         "water": _water(db, user, the_day),
@@ -729,6 +734,59 @@ def get_insights(user: User = Depends(auth.current_user), db: Session = Depends(
 
 def _activity_dict(a: Activity | None) -> dict | None:
     return None if a is None else {"active_kcal": a.active_kcal, "steps": a.steps}
+
+
+# Activity totals: the same bounds whether the Shortcut or a confirmed coach card sends them.
+MAX_STEPS = 200000
+MAX_ACTIVE_KCAL = 10000
+
+
+def _upsert_activity(db: Session, user: User, d: date, kcal: float | None, steps: int | None) -> None:
+    """A field that wasn't sent (None) keeps what was there."""
+    a = db.scalar(select(Activity).where(Activity.user_id == user.id, Activity.day == d))
+    if a is None:
+        a = Activity(user_id=user.id, day=d)
+        db.add(a)
+    if kcal is not None:
+        a.active_kcal = round(kcal, 1)
+    if steps is not None:
+        a.steps = steps
+
+
+class WorkoutIn(BaseModel):
+    kind: str = Field(min_length=1, max_length=40)
+    minutes: int = Field(ge=1, le=1440)
+    kcal: float | None = Field(None, gt=0, le=5000)
+    distance_km: float | None = Field(None, gt=0, le=500)
+    avg_hr: int | None = Field(None, ge=30, le=230)
+    time: str | None = None  # local "HH:MM"
+
+    @field_validator("kind", mode="before")
+    @classmethod
+    def _strip(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("time")
+    @classmethod
+    def _hhmm(cls, v):
+        if v is not None and not _HHMM.fullmatch(v):
+            raise ValueError(f"time {v!r}")
+        return v
+
+
+def _workout_dict(w: Workout) -> dict:
+    return {"id": w.id, "time": w.started, "kind": w.kind, "minutes": w.minutes, "kcal": w.kcal,
+            "distance_km": w.distance_km, "avg_hr": w.avg_hr}
+
+
+@router.delete("/workouts/{workout_id}")
+def delete_workout(workout_id: int, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    w = db.get(Workout, workout_id)
+    if w is None or w.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Тренировка не найдена")
+    db.delete(w)
+    db.commit()
+    return {"ok": True}
 
 
 # ---------- reports ----------
@@ -937,6 +995,8 @@ def export(
         zf.writestr("weights.csv", _csv(["date", "kg"], by_day(Weight, "kg")))
         zf.writestr("water.csv", _csv(["date", "ml"], by_day(Water, "ml")))
         zf.writestr("activity.csv", _csv(["date", "active_kcal", "steps"], by_day(Activity, "active_kcal", "steps")))
+        workout_cols = ("kind", "minutes", "kcal", "distance_km", "avg_hr")
+        zf.writestr("workouts.csv", _csv(["date", "time", *workout_cols], by_day(Workout, "started", *workout_cols)))
     name = f"food-tracker-{_today(user).isoformat()}.zip"
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
@@ -1125,8 +1185,8 @@ async def receive_health(request: Request, authorization: str = Header(""), db: 
     kcal = _number(data.get("active_kcal"))
     steps = _number(data.get("steps"))
     weight = _number(data.get("weight_kg"), combine=lambda xs: xs[-1])
-    kcal = kcal if kcal is not None and 0 <= kcal <= 10000 else None
-    steps = int(steps) if steps is not None and 0 <= steps <= 200000 else None
+    kcal = kcal if kcal is not None and 0 <= kcal <= MAX_ACTIVE_KCAL else None
+    steps = int(steps) if steps is not None and 0 <= steps <= MAX_STEPS else None
     weight = weight if weight is not None and 20 <= weight <= 400 else None
     if kcal is None and steps is None and weight is None:
         logger.warning("Health payload not understood: %s", (await request.body())[:500])
@@ -1137,15 +1197,7 @@ async def receive_health(request: Request, authorization: str = Header(""), db: 
     if d > today or d < today - timedelta(days=30):
         raise HTTPException(status_code=400, detail="Дата должна быть за последние 30 дней")
     if kcal is not None or steps is not None:
-        a = db.scalar(select(Activity).where(Activity.user_id == user.id, Activity.day == d))
-        if a is None:
-            a = Activity(user_id=user.id, day=d)
-            db.add(a)
-        # A field the Shortcut didn't send keeps what was there.
-        if kcal is not None:
-            a.active_kcal = round(kcal, 1)
-        if steps is not None:
-            a.steps = steps
+        _upsert_activity(db, user, d, kcal, steps)
     if weight is not None:
         _upsert_weight(db, user, d, round(weight, 1))
     db.commit()
@@ -1294,6 +1346,23 @@ def _proposal_payload(db: Session, user: User, call: coach.ToolCall) -> dict:
         return {"ml": water.delta_ml, "date": today.isoformat()}
     if call.name == "log_weight":
         return {"kg": round(WeightIn(kg=raw["kg"]).kg, 1), "date": today.isoformat()}
+    if call.name == "log_workout":
+        # The tool is strict, so "unknown" comes as 0 or "".
+        w = WorkoutIn(kind=str(raw["kind"]), minutes=raw["minutes"], kcal=raw["kcal"] or None,
+                      distance_km=raw["distance_km"] or None, avg_hr=raw["avg_hr"] or None,
+                      time=str(raw["time"] or "").strip() or None)
+        return {**w.model_dump(), "kcal": w.kcal and (round(w.kcal) or None),
+                "distance_km": w.distance_km and (round(w.distance_km, 2) or None), "date": today.isoformat()}
+    if call.name == "log_activity":
+        steps, kcal = raw["steps"] or None, raw["active_kcal"] or None
+        if steps is not None and not (isinstance(steps, (int, float)) and 0 < steps <= MAX_STEPS):
+            raise ValueError(f"steps {steps!r}")
+        if kcal is not None and not (isinstance(kcal, (int, float)) and 0 < kcal <= MAX_ACTIVE_KCAL):
+            raise ValueError(f"active_kcal {kcal!r}")
+        if steps is None and kcal is None:
+            raise ValueError("no activity numbers")
+        return {"steps": None if steps is None else int(steps), "active_kcal": None if kcal is None else round(kcal),
+                "date": today.isoformat()}
     raise ValueError(f"unknown tool {call.name!r}")
 
 
@@ -1320,12 +1389,18 @@ def _action_summary(a: dict) -> dict:
         return {"old": p["old"], "new": {k: p[k] for k in ("kcal", "protein", "fat", "carbs")}, "reason": p["reason"]}
     if a["type"] == "add_water":
         return {"ml": p["ml"], "date": p["date"]}
-    return {"kg": p["kg"], "date": p["date"]}
+    if a["type"] == "log_weight":
+        return {"kg": p["kg"], "date": p["date"]}
+    if a["type"] == "log_workout":
+        return {k: p[k] for k in ("kind", "minutes", "kcal", "distance_km", "avg_hr", "time", "date")}
+    if a["type"] == "log_activity":
+        return {k: p[k] for k in ("steps", "active_kcal", "date")}
+    return {}
 
 
 def _msg_dict(m: ChatMessage) -> dict:
     actions = json.loads(m.actions) if m.actions else []
-    return {"id": m.id, "role": m.role, "text": m.content,
+    return {"id": m.id, "role": m.role, "text": m.content, "has_image": bool(m.has_image),
             "actions": [{"id": a["id"], "type": a["type"], "status": a["status"], "summary": _action_summary(a)}
                         for a in actions]}
 
@@ -1342,8 +1417,15 @@ def _apply_action(db: Session, user: User, a: dict) -> None:
         _set_goals(user, GoalsIn(**{k: p[k] for k in ("kcal", "protein", "fat", "carbs")}))
     elif a["type"] == "add_water":
         _add_water(db, user, date.fromisoformat(p["date"]), p["ml"])
-    else:
+    elif a["type"] == "log_weight":
         _upsert_weight(db, user, _weight_day(user, date.fromisoformat(p["date"])), p["kg"])
+    elif a["type"] == "log_workout":
+        db.add(Workout(user_id=user.id, day=date.fromisoformat(p["date"]), started=p["time"], kind=p["kind"],
+                       minutes=p["minutes"], kcal=p["kcal"], distance_km=p["distance_km"], avg_hr=p["avg_hr"]))
+    elif a["type"] == "log_activity":
+        _upsert_activity(db, user, date.fromisoformat(p["date"]), p["active_kcal"], p["steps"])
+    else:
+        raise ValueError(f"unknown action {a['type']!r}")
 
 
 @router.get("/coach")
@@ -1352,15 +1434,41 @@ def coach_chat(user: User = Depends(auth.current_user), db: Session = Depends(ge
     return {"messages": [_msg_dict(m) for m in msgs], **_chat_state(db, user)}
 
 
+MAX_COACH_IMAGE_CHARS = 2_500_000  # base64; the browser sends ~200 KB, this is the safety net
+IMAGE_ONLY_TEXT = "Посмотри, пожалуйста, скриншот"
+BAD_IMAGE = "Не получилось прочитать изображение"
+
+
 class CoachIn(BaseModel):
-    text: str = Field(min_length=1, max_length=coach.MAX_MESSAGE_CHARS)
+    text: str = Field("", max_length=coach.MAX_MESSAGE_CHARS)
+    image: str | None = Field(None, max_length=MAX_COACH_IMAGE_CHARS)  # base64 or a data: URL
+
+
+def _coach_image(raw: str) -> bytes:
+    """The attached image as a small JPEG; 400 if it isn't one."""
+    if raw.startswith("data:"):
+        head, _, raw = raw.partition(",")
+        if not head.startswith("data:image/") or not head.endswith(";base64"):
+            raise HTTPException(status_code=400, detail=BAD_IMAGE)
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=BAD_IMAGE) from exc
+    jpeg = shrink(data)
+    del data
+    release_memory()  # as after a meal photo: the container has 250 MB
+    if jpeg is None:
+        raise HTTPException(status_code=400, detail=BAD_IMAGE)
+    return jpeg
 
 
 @router.post("/coach")
 def coach_say(body: CoachIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
     text = body.text.strip()
-    if not text:
+    if not text and not body.image:
         raise HTTPException(status_code=400, detail="Пустое сообщение")
+    image = _coach_image(body.image) if body.image else None
+    text = text or IMAGE_ONLY_TEXT
     if coach.used_today(db, user) >= get_settings().coach_daily_messages:
         raise HTTPException(status_code=429, detail="На сегодня сообщения коучу закончились — продолжим завтра")
     if problem := usage.limit_problem(db, user):
@@ -1369,7 +1477,7 @@ def coach_say(body: CoachIn, user: User = Depends(auth.current_user), db: Sessio
     today = _today(user)
     expenditure = _energy(db, user, today, _daily_rows(db, user, today - timedelta(days=6), today))
     try:
-        reply = coach.ask(db, user, text, extra={"expenditure": expenditure})
+        reply = coach.ask(db, user, text, extra={"expenditure": expenditure}, image=image)
     except coach.CoachErrorWithResponse as exc:
         usage.record_call(db, user, exc.response, model=model, error=str(exc))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -1378,7 +1486,7 @@ def coach_say(body: CoachIn, user: User = Depends(auth.current_user), db: Sessio
     usage.record_call(db, user, reply.response, model=model)
     actions = _proposals(db, user, reply.calls)
     answer_text = reply.text or (coach.NO_TEXT_REPLY if actions else NO_ACTION_REPLY)
-    mine = ChatMessage(user_id=user.id, role="user", content=text)
+    mine = ChatMessage(user_id=user.id, role="user", content=text, has_image=image is not None)
     answer = ChatMessage(user_id=user.id, role="assistant", content=answer_text,
                          actions=json.dumps(actions, ensure_ascii=False) if actions else None)
     db.add_all([mine, answer])

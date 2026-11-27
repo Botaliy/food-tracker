@@ -199,6 +199,24 @@ class Activity(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
+class Workout(Base):
+    """One workout the user confirmed from the coach chat (typed or read off a watch screenshot).
+    Several per day; None = unknown. A watch's daily active_kcal already includes these."""
+
+    __tablename__ = "workouts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    day: Mapped[date_] = mapped_column(Date, index=True)  # the user's local day
+    started: Mapped[str | None] = mapped_column(String(5), nullable=True)  # local "HH:MM"
+    kind: Mapped[str] = mapped_column(String(40))  # free text: «Бег», «Силовая»
+    minutes: Mapped[int] = mapped_column(Integer)
+    kcal: Mapped[float | None] = mapped_column(Float, nullable=True)
+    distance_km: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_hr: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Water(Base):
     """Water drunk on a local day, in ml."""
 
@@ -223,6 +241,8 @@ class ChatMessage(Base):
     # Assistant only: what the coach proposed to write, as JSON [{id, type, payload, status}],
     # status pending | done | declined. Nothing is written until the user accepts (app.routers.api).
     actions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # User only: a screenshot went with it. The image itself is never stored.
+    has_image: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
