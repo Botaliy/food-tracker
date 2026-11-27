@@ -583,3 +583,21 @@ button.link { background: transparent; border: none; color: var(--accent-ink); f
 .badge.wait { background: var(--over-soft); color: var(--text); }
 .meal.queued { opacity: .85; border-style: dashed; border-color: var(--line); }
 .guess [hidden] { display: none; }
+
+/* «Итоги месяца» */
+.recap-card { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; font: inherit; color: inherit; background: linear-gradient(160deg, var(--accent-soft), var(--card) 70%); }
+.recap-card .grow { display: flex; flex-direction: column; gap: 2px; }
+.recap-card > .ic { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.recap-nav { margin: -4px 0 10px; }
+.recap-nav button[disabled] { visibility: hidden; }
+.collage { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; border-radius: 18px; overflow: hidden; margin-bottom: 12px; }
+.collage img { width: 100%; height: 100%; aspect-ratio: 1; object-fit: cover; display: block; background: var(--track); }
+.collage.n1 { grid-template-columns: 1fr; }
+.collage.n1 img { aspect-ratio: 16 / 10; }
+.collage.n2, .collage.n4 { grid-template-columns: repeat(2, 1fr); }
+.collage.n5 img:first-child, .collage.n8 img:first-child { grid-column: span 2; aspect-ratio: 2; }
+.collage.n7 img:first-child { grid-column: span 3; aspect-ratio: 3; }
+.recap-top { list-style: none; margin: 10px 0 0; padding: 0; counter-reset: top; }
+.recap-top li { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 7px 0; counter-increment: top; }
+.recap-top li + li { border-top: 1px solid var(--card-border); }
+.recap-top li > span:first-child::before { content: counter(top) ". "; color: var(--muted); }

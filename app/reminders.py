@@ -3,6 +3,7 @@
 - Evening: at the hour the user picked, if nothing is logged today. With a streak at
   stake the message says so.
 - Monday morning: make the weekly review and say it's ready.
+- The 1st, in the morning: the recap of the month that ended, if there was a diary to recap.
 
 Each kind goes out at most once a day per user (Profile.last_*_push), so a restart or a
 slow tick never sends twice.
@@ -18,14 +19,14 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import diary, push, review
+from app import diary, push, recap, review
 from app.database import SessionLocal
 from app.models import Profile, PushSubscription, User
 
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 300
-WEEKLY_HOUR = 10  # Monday, local time
+WEEKLY_HOUR = 10  # Monday (and the 1st, for the month), local time
 
 
 def evening_text(streak: int, freeze_ready: bool, partners: list[str]) -> tuple[str, str]:
@@ -75,6 +76,14 @@ def run_due(db: Session, now: datetime, send: Callable = push.send) -> list[tupl
                 title, body = evening_text(info["days"], info["freeze_ready"], partners_logged(db, user, profile))
                 if send(db, user, title, body):
                     done.append((user.id, "evening"))
+
+        if (profile.monthly_recap_push and local.day == 1 and local.hour >= WEEKLY_HOUR
+                and profile.last_monthly_push != today):
+            profile.last_monthly_push = today
+            db.commit()
+            month = recap.build(db, user, recap.previous(today), today)
+            if month["logged_days"] >= recap.MIN_DAYS and send(db, user, *recap.push_text(month), "/#recap"):
+                done.append((user.id, "monthly"))
 
         if (profile.weekly_review_push and local.weekday() == 0 and local.hour >= WEEKLY_HOUR
                 and profile.last_weekly_push != today):

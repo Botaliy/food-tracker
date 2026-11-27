@@ -168,12 +168,14 @@ class Profile(Base):
     remind_evening: Mapped[bool] = mapped_column(Boolean, default=True)
     remind_hour: Mapped[int] = mapped_column(Integer, default=21)  # local hour
     weekly_review_push: Mapped[bool] = mapped_column(Boolean, default=True)
+    monthly_recap_push: Mapped[bool] = mapped_column(Boolean, default=True)
     share_streak: Mapped[bool] = mapped_column(Boolean, default=False)  # shown to the others who share theirs
     onboarded: Mapped[bool] = mapped_column(Boolean, default=False)  # went through (or skipped) the first-run steps
     track_water: Mapped[bool] = mapped_column(Boolean, default=True)
     water_goal_ml: Mapped[int] = mapped_column(Integer, default=2000)
     last_evening_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
     last_weekly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
+    last_monthly_push: Mapped[date_ | None] = mapped_column(Date, nullable=True)
 
 
 class PushSubscription(Base):

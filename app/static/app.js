@@ -869,6 +869,8 @@ app.addEventListener("click", (e) => {
     applyGoals(state.stats.energy.adaptive.suggested);
   } else if (act === "review") {
     makeReview();
+  } else if (act === "recap") {
+    openRecap();
   } else if (act === "save-weight") {
     saveWeight();
   } else if (act === "add") {
@@ -903,11 +905,13 @@ async function loadStats() {
   showSkeleton("reports");
   state.view = "reports";
   try {
-    const [stats, review, found] = await Promise.all([
+    const [stats, review, found, recap] = await Promise.all([
       api(`/api/stats?days=${state.statsDays}`),
       state.review ? Promise.resolve(state.review) : api("/api/review"),
       api("/api/insights").catch(() => []),
+      api("/api/recap").catch(() => null),
     ]);
+    state.recap = recap;
     state.stats = stats;
     state.review = review;
     state.insights = found;
@@ -986,6 +990,7 @@ function renderStats() {
       <div class="tile"><span class="muted small">В норме</span><b>${s.in_goal_days}<small> / ${s.logged_days}</small></b><span class="muted small">дней с записями</span></div>
       <div class="tile"><span class="muted small">В среднем</span><b>${r0(a.kcal)}</b><span class="muted small">ккал/день</span></div>
     </div>
+    ${recapCard(state.recap)}
     ${insightsCard(state.insights)}
     ${reviewCard()}
     <div class="card">
@@ -1063,6 +1068,64 @@ function insightsCard(list) {
   return `<div class="card"><b>Наблюдения за 2 недели</b>
     <ul class="insights">${list.map((i) => `<li><span class="li-ico">${iconOf(i.icon)}</span><span>${esc(i.text)}</span></li>`).join("")}</ul></div>`;
 }
+
+// «Итоги месяца»: counted from the diary, no model. The card on Reports opens the sheet.
+const RECAP_MIN_DAYS = 3;
+const monthGen = (ym) => new Date(ym + "-15T12:00").toLocaleDateString("ru-RU", { day: "numeric", month: "long" }).replace(/^\d+\s+/, "");
+const monthNom = (ym) => { const m = new Date(ym + "-15T12:00").toLocaleDateString("ru-RU", { month: "long" }); return m[0].toUpperCase() + m.slice(1); };
+const daysWord = (n) => `${n} ${plural(n, "день", "дня", "дней")}`;
+
+function recapCard(r) {
+  if (!r || r.logged_days < RECAP_MIN_DAYS) return "";
+  return `<button class="card recap-card" data-act="recap">
+    <span class="li-ico">${ICONS.party}</span>
+    <span class="grow"><b>${r.complete ? `Итоги ${monthGen(r.month)}` : `${monthNom(r.month)}: месяц идёт`}</b>
+      <span class="muted small">${daysWord(r.logged_days)} с записями · ${r.in_goal_days} в норме</span></span>
+    ${ICONS.right}
+  </button>`;
+}
+
+function recapHtml(r) {
+  const fact = (icon, text, hint = "") => `<li><span class="li-ico">${icon}</span><span>${text}${hint ? `<span class="muted small">${hint}</span>` : ""}</span></li>`;
+  const kg = (n) => String(n).replace(".", ",").replace("-", "−");
+  const nav = (ym, icon, label) => ym
+    ? `<button class="ghost" data-recap-month="${ym}" aria-label="${label}">${icon}</button>`
+    : `<button class="ghost" disabled aria-hidden="true">${icon}</button>`;
+  return `
+    <div class="row between"><h2>${r.complete ? `Итоги ${monthGen(r.month)}` : `${monthNom(r.month)} — месяц ещё идёт`}</h2><button class="ghost" data-close aria-label="Закрыть">${ICONS.close}</button></div>
+    <div class="row between recap-nav">${nav(r.prev, ICONS.left, "Предыдущий месяц")}<span class="muted small">${monthNom(r.month)} ${r.month.slice(0, 4)}</span>${nav(r.next, ICONS.right, "Следующий месяц")}</div>
+    ${!r.logged_days ? '<p class="muted center">В этом месяце записей нет.</p>' : `
+    ${r.photos.length ? `<div class="collage n${r.photos.length}">${r.photos.map((p) =>
+      `<img src="/api/photos/${encodeURIComponent(p.photo)}" loading="lazy" decoding="async" alt="${esc(dayLabel(p.date))}">`).join("")}</div>` : ""}
+    <div class="tiles">
+      <div class="tile"><span class="muted small">С записями</span><b>${r.logged_days}<small> / ${r.days_total}</small></b><span class="muted small">${plural(r.logged_days, "день", "дня", "дней")}</span></div>
+      <div class="tile"><span class="muted small">В норме</span><b>${r.in_goal_days}</b><span class="muted small">${plural(r.in_goal_days, "день", "дня", "дней")}</span></div>
+      <div class="tile"><span class="muted small">В среднем</span><b>${r.avg_kcal}</b><span class="muted small">ккал/день</span></div>
+    </div>
+    <div class="card">
+      <ul class="insights" style="margin-top:0">
+        ${r.best_day ? fact(ICONS.flag, `Лучший день — ${esc(dayLabel(r.best_day.date).toLowerCase())}`, `${r.best_day.kcal} ккал и ${r.best_day.protein} г белка: в норме и белка больше всего`) : ""}
+        ${fact(ICONS.flame, `${daysWord(r.longest_run)} подряд`, "Самая длинная серия записей за месяц")}
+        ${fact(ICONS.dumbbell, `${daysWord(r.protein_days)} с белком`, "Белок от 90% нормы")}
+        ${fact(ICONS.plate, `${r.meals} ${plural(r.meals, "приём пищи", "приёма пищи", "приёмов пищи")}`)}
+        ${r.weight ? fact(ICONS.scale, `Вес: ${r.weight.delta > 0 ? "+" : ""}${kg(r.weight.delta)} кг`, `С ${kg(r.weight.from)} до ${kg(r.weight.to)} кг между первым и последним взвешиванием`) : ""}
+        ${r.guess ? fact(ICONS.camera, `Глазомер: промах ${r.guess.off_percent}%`, `Обычный промах в «Угадай калории», ${r.guess.n} ${plural(r.guess.n, "тарелка", "тарелки", "тарелок")}`) : ""}
+      </ul>
+    </div>
+    ${r.top.length ? `<div class="card"><b>Чаще всего в тарелке</b>
+      <ol class="recap-top">${r.top.map((t) => `<li><span>${esc(t.name)}</span><span class="muted small">${t.times} ${plural(t.times, "раз", "раза", "раз")}</span></li>`).join("")}</ol></div>` : ""}`}`;
+}
+
+async function openRecap(month = null) {
+  try {
+    const r = month || !state.recap ? await api(`/api/recap${month ? `?month=${month}` : ""}`) : state.recap;
+    openSheet(recapHtml(r));
+  } catch (err) { toast(err.message); }
+}
+sheetBody.addEventListener("click", (e) => {
+  const nav = e.target.closest("[data-recap-month]");
+  if (nav) openRecap(nav.dataset.recapMonth);
+});
 
 function reviewCard() {
   const r = state.review?.review;
@@ -2407,7 +2470,7 @@ async function renderOnboarding(step = 1) {
         <li>Дальше открывай приложение с иконки на экране «Домой».</li>
       </ol></div>${foot("Сделал, дальше")}`;
   } else {
-    let n = { evening: true, hour: 21, weekly: true, share_streak: false };
+    let n = { evening: true, hour: 21, weekly: true, monthly: true, share_streak: false };
     try { n = (await api("/api/profile")).notify; } catch { /* defaults */ }
     app.innerHTML = `${head("Напоминания и серии", "Вечером напомню, если день пустой. А в общих сериях видно, кто сегодня уже записал — так держаться проще.")}
       <div class="card" id="notify-card"></div>${foot("Готово")}`;
@@ -2417,7 +2480,7 @@ async function renderOnboarding(step = 1) {
     if (step === 3) {
       const f = $("#notify-form");
       await api("/api/profile/notify", { method: "PUT", json: {
-        evening: f.evening.checked, hour: +f.hour.value, weekly: f.weekly.checked, share_streak: f.share_streak.checked } }).catch(() => {});
+        evening: f.evening.checked, hour: +f.hour.value, weekly: f.weekly.checked, monthly: f.monthly.checked, share_streak: f.share_streak.checked } }).catch(() => {});
     }
     renderOnboarding(step + 1);
   };
@@ -2601,6 +2664,7 @@ async function renderNotify(n, { autosave = true } = {}) {
     <form id="notify-form" class="toggles">
       <label class="check"><input type="checkbox" name="evening" ${n.evening ? "checked" : ""}> Напомнить вечером, если день пустой, в <select name="hour">${hours}</select></label>
       <label class="check"><input type="checkbox" name="weekly" ${n.weekly ? "checked" : ""}> Обзор недели по понедельникам</label>
+      <label class="check"><input type="checkbox" name="monthly" ${n.monthly ? "checked" : ""}> Итоги месяца первого числа</label>
       <label class="check"><input type="checkbox" name="share_streak" ${n.share_streak ? "checked" : ""}> Участвовать в общих сериях <span class="muted small">— твою серию увидят те, кто тоже участвует</span></label>
     </form>`;
   $("#notify-form").onchange = async (e) => {
@@ -2608,7 +2672,7 @@ async function renderNotify(n, { autosave = true } = {}) {
     const f = e.currentTarget;
     try {
       const p = await api("/api/profile/notify", { method: "PUT", json: {
-        evening: f.evening.checked, hour: +f.hour.value, weekly: f.weekly.checked, share_streak: f.share_streak.checked } });
+        evening: f.evening.checked, hour: +f.hour.value, weekly: f.weekly.checked, monthly: f.monthly.checked, share_streak: f.share_streak.checked } });
       toast("Сохранено");
       if (e.target.name === "share_streak") state.streaks = await api("/api/streaks").catch(() => null);
       n = p.notify;
@@ -2676,7 +2740,13 @@ async function start() {
     flushQueue();
     if (state.me.timezone !== TZ) api("/api/me", { method: "PUT", json: { ...state.me.goals, timezone: TZ } }).then((m) => (state.me = m)).catch(() => {});
     // A tap on the weekly review notification opens /#reports.
-    if (location.hash === "#reports") { history.replaceState(null, "", "/"); await loadStats(); }
+    // …and on the monthly recap one, /#recap: Reports with the recap on top.
+    if (location.hash === "#reports" || location.hash === "#recap") {
+      const recap = location.hash === "#recap";
+      history.replaceState(null, "", "/");
+      await loadStats();
+      if (recap) openRecap();
+    }
     else if (profileHash()) await loadProfileView(profileHash());
     else if (!state.me.onboarded) renderOnboarding(1);
     else await loadDay();

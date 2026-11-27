@@ -19,7 +19,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from app import (auth, barcodes, coach, corrections, diary, energy, foods, idempotency, insights, photos, push, recipes,
+from app import (auth, barcodes, coach, corrections, diary, energy, foods, idempotency, insights, photos, push, recap, recipes,
                  review as review_mod, usage)
 from app.config import get_settings
 from app.database import get_db
@@ -918,6 +918,19 @@ def stats(days: int = Query(7, ge=1, le=366), user: User = Depends(auth.current_
     }
 
 
+@router.get("/recap")
+def month_recap(month: str | None = Query(None, pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+                user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """«Итоги месяца». Without a month: the one that just ended, or the current one for a young diary."""
+    today = _today(user)
+    if month is None:
+        return recap.latest(db, user, today)
+    first = date(int(month[:4]), int(month[5:]), 1)
+    if first > today:
+        raise HTTPException(status_code=400, detail="Этот месяц ещё не начался")
+    return recap.build(db, user, first, today)
+
+
 class WeightIn(BaseModel):
     kg: float = Field(ge=20, le=400)
     day: date | None = Field(None, alias="date")
@@ -1080,7 +1093,7 @@ def _profile_dict(db: Session, user: User, profile: Profile) -> dict:
                    "last_day": last_activity.isoformat() if last_activity else None},
         "notify": {
             "evening": profile.remind_evening, "hour": profile.remind_hour,
-            "weekly": profile.weekly_review_push, "share_streak": profile.share_streak,
+            "weekly": profile.weekly_review_push, "monthly": profile.monthly_recap_push, "share_streak": profile.share_streak,
             "devices": db.scalar(select(func.count()).select_from(PushSubscription).where(PushSubscription.user_id == user.id)),
         },
     }
@@ -1243,6 +1256,7 @@ class NotifyIn(BaseModel):
     evening: bool
     hour: int = Field(ge=17, le=23)
     weekly: bool
+    monthly: bool | None = None  # None: an app from before the monthly recap, leave it as it is
     share_streak: bool
 
 
@@ -1251,6 +1265,8 @@ def put_notify(body: NotifyIn, user: User = Depends(auth.current_user), db: Sess
     profile = _profile(db, user)
     profile.remind_evening, profile.remind_hour = body.evening, body.hour
     profile.weekly_review_push, profile.share_streak = body.weekly, body.share_streak
+    if body.monthly is not None:
+        profile.monthly_recap_push = body.monthly
     db.commit()
     return _profile_dict(db, user, profile)
 
