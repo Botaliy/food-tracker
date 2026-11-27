@@ -442,6 +442,8 @@ input.item-name { border: 1px solid transparent; background: transparent; paddin
 input.item-name:focus { border-color: var(--line); background: var(--card); }
 .mult { display: flex; gap: 6px; margin-top: 8px; }
 .mult button { padding: 4px 12px; min-height: 36px; font-size: 14px; border-radius: 99px; color: var(--muted); }
+.mult { flex-wrap: wrap; align-items: center; }
+.mult .pack-count, .mult .set-pack { margin-left: auto; }
 
 /* first run */
 .onb-head { margin: 18px 4px 14px; }

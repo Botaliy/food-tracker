@@ -143,6 +143,7 @@ def food_dict(food: Food) -> dict:
         "fiber_100": _r(food.fiber),
         "sugar_100": _r(food.sugar),
         "salt_100": _r(food.salt, 2),
+        "package_grams": food.package_grams,
     }
     if food.source == "recipe":  # the usual helping is where logging a dish starts
         out["portion_grams"] = food.portion_grams

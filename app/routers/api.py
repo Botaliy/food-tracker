@@ -229,6 +229,7 @@ class FoodIn(BaseModel):
     sugar_100: float | None = Field(None, ge=0, le=100)
     salt_100: float | None = Field(None, ge=0, le=100)
     barcode: str | None = Field(None, max_length=32)
+    package_grams: float | None = Field(None, ge=1, le=5000)
 
 
 @router.post("/foods")
@@ -237,9 +238,25 @@ def add_food(body: FoodIn, user: User = Depends(auth.current_user), db: Session 
         source="custom", name=body.name.strip(), name_ru=body.name.strip(), owner_id=user.id,
         barcode=barcodes.normalize(body.barcode) if body.barcode else None,
         kcal=body.kcal_100, protein=body.protein_100, fat=body.fat_100, carbs=body.carbs_100,
-        fiber=body.fiber_100, sugar=body.sugar_100, salt=body.salt_100,
+        fiber=body.fiber_100, sugar=body.sugar_100, salt=body.salt_100, package_grams=body.package_grams,
     )
     db.add(food)
+    db.commit()
+    return foods.food_dict(food)
+
+
+class PackageIn(BaseModel):
+    grams: float | None = Field(None, ge=1, le=5000)  # None: forget the pack
+
+
+@router.put("/foods/{food_id}/package")
+def set_food_package(food_id: int, body: PackageIn, user: User = Depends(auth.current_user), db: Session = Depends(get_db)):
+    """The weight of one pack of a shared food, told once by whoever logs it first. Scanned and
+    hand-added foods only: USDA rows are generic, and a dish has its usual portion."""
+    food = foods.usable(db.get(Food, food_id), user.id)
+    if food is None or food.source not in ("off", "custom"):
+        raise HTTPException(status_code=404, detail="Продукт не найден")
+    food.package_grams = body.grams
     db.commit()
     return foods.food_dict(food)
 
@@ -256,7 +273,7 @@ def food_by_barcode(code: str, user: User = Depends(auth.current_user), db: Sess
         raise HTTPException(status_code=503, detail="База штрихкодов не отвечает — введи значения с этикетки") from exc
     if food is None:
         raise HTTPException(status_code=404, detail="Такого продукта ещё нет в базе")
-    return {**foods.food_dict(food), "barcode": norm}
+    return {**foods.food_dict(food), "barcode": norm, "last_grams": _last_grams(db, user, [food.id]).get(food.id)}
 
 
 # ---------- meals ----------

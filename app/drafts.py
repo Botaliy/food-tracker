@@ -19,6 +19,7 @@ def _estimate(item: RecognizedItem) -> dict:
         "fiber_100": None if item.fiber_100 is None else round(item.fiber_100, 1),
         "sugar_100": None if item.sugar_100 is None else round(item.sugar_100, 1),
         "salt_100": None if item.salt_100 is None else round(item.salt_100, 2),
+        "package_grams": None,
     }
 
 
@@ -43,6 +44,8 @@ def draft_item(db: Session, item: RecognizedItem, user_id: int) -> dict:
         "name": item.name_ru,
         "grams": round(item.grams),
         "ai_grams": round(item.grams),
+        # The pack in the photo, read off its label, over the database's: the same drink comes in several sizes.
+        "package_grams": round(item.package_grams) if item.package_grams else base["package_grams"],
         "confidence": item.confidence,
         "options": options,
     }

@@ -66,6 +66,8 @@ class Food(Base):
     # portion_grams: the usual helping, the default when logging it.
     cooked_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
     portion_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Packaged foods: the net weight of one pack (a can, a bar), g or ml; logging starts from it.
+    package_grams: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     recipe_items: Mapped[list["RecipeItem"]] = relationship(
         foreign_keys="RecipeItem.food_id", cascade="all, delete-orphan", order_by="RecipeItem.id"

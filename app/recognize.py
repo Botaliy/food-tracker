@@ -30,6 +30,7 @@ class RecognizedItem(BaseModel):
     fiber_100: float | None = Field(None, ge=0)
     sugar_100: float | None = Field(None, ge=0)
     salt_100: float | None = Field(None, ge=0)
+    package_grams: float | None = Field(None, ge=0)  # one pack of a packaged product; 0 / None: not packaged
     confidence: str
 
 
@@ -63,10 +64,15 @@ SCHEMA = {
                     "fiber_100": {"type": "number", "description": "Dietary fibre, g per 100 g."},
                     "sugar_100": {"type": "number", "description": "Total sugars (natural and added), g per 100 g."},
                     "salt_100": {"type": "number", "description": "Salt (sodium x 2.5), g per 100 g."},
+                    "package_grams": {
+                        "type": "number",
+                        "description": "Net weight or volume of ONE pack (can, bottle, bar, cup) in g or ml when this is a "
+                        "packaged product or a drink in its container; 0 for anything else.",
+                    },
                     "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
                 },
                 "required": ["name_ru", "name_en", "grams", "kcal_100", "protein_100", "fat_100", "carbs_100",
-                             "fiber_100", "sugar_100", "salt_100", "confidence"],
+                             "fiber_100", "sugar_100", "salt_100", "package_grams", "confidence"],
                 "additionalProperties": False,
             },
         },
@@ -93,6 +99,11 @@ Components:
 - Split a plate into its parts when they are visible separately (chicken, rice, salad).
 - Keep a dish whole when its parts are mixed (borscht, plov, lasagna, a sandwich) and estimate the dish as a whole.
 - Packaged products: if a label or brand is readable, name it and use its numbers.
+
+Packs (a can, a bottle, a bar, a yogurt cup, a bag of crisps):
+- Don't judge a pack by eye. Read the net weight or volume off the label ("0,5 л" is 500, "330 ml" is 330); count 1 ml as 1 g.
+- If it isn't readable, take the usual size of that container: a beer can is 500 (a small one 330), a soda can 330, a chocolate bar 90, a yogurt cup 125.
+- Put the size of one pack in package_grams, and in grams that size times the number of packs in the photo: a pack is eaten whole unless the note says otherwise or it is plainly part-empty.
 
 Numbers per 100 g are your best estimate; they are checked against a nutrition database.
 Also estimate fibre, total sugars and salt per 100 g (salt, not sodium; include salt added in cooking for home-made dishes).
@@ -126,6 +137,8 @@ def _recipe_schema() -> dict:
         "Generic English name of the RAW ingredient in the wording of the USDA SR Legacy database: "
         "'carrots raw', 'rice white short-grain raw', 'beef chuck raw', 'oil sunflower'. No brand names.")
     props["grams"]["description"] = "Weight of this raw ingredient for the whole dish, in grams, before cooking."
+    del props["package_grams"]  # an ingredient is weighed, not counted in packs
+    item["required"].remove("package_grams")
     for key in ("kcal_100", "protein_100", "fat_100", "carbs_100", "fiber_100", "sugar_100", "salt_100"):
         props[key]["description"] += " Of the raw ingredient."
     return {

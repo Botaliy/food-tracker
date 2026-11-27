@@ -1285,8 +1285,24 @@ const MEAL_TYPES = [["Завтрак", "08:30"], ["Обед", "13:00"], ["Ужи
 const typeOf = (time) => { const h = Number(time.slice(0, 2)); return h < 11 ? "Завтрак" : h < 16 ? "Обед" : h < 22 ? "Ужин" : "Перекус"; };
 
 const SOURCE_LABEL = { usda: "база USDA", off: "Open Food Facts", custom: "мой продукт", recipe: "моё блюдо", estimate: "оценка ИИ", manual: "вручную" };
-// Where the grams start for a food just picked: last time's helping, a dish's usual portion, else 100 g.
-const startGrams = (f) => r0(f.last_grams || f.portion_grams || (f.source === "recipe" ? DISH_PORTION : 100));
+// Where the grams start for a food just picked: last time's helping, one pack, a dish's usual portion, else 100 g.
+const startGrams = (f) => r0(f.last_grams || f.package_grams || f.portion_grams || (f.source === "recipe" ? DISH_PORTION : 100));
+
+// A packaged food is counted in packs: «1,5 уп.» of a 500 g can.
+const PACK_COUNTS = [0.5, 1, 2, 3];
+const packCount = (it) => (Number(it.grams) || 0) / it.package_grams;
+const packLabel = (it) => `${String(Math.round(packCount(it) * 100) / 100).replace(".", ",")} уп. по ${r0(it.package_grams)} г`;
+// Whoever logs a scanned or hand-added food first can say «this was the whole pack», for everyone.
+const canSetPack = (it) => it.food_id != null && (it.source === "off" || it.source === "custom");
+
+function multHtml(it, idx) {
+  if (it.package_grams > 0) {
+    return `<div class="mult">${PACK_COUNTS.map((k) => `<button data-pack="${k}" data-i="${idx}">${k === 0.5 ? "½" : k} уп.</button>`).join("")}
+      <span class="small muted pack-count" data-pack-count="${idx}">${packLabel(it)}</span></div>`;
+  }
+  return `<div class="mult">${[["½", 0.5], ["×1,5", 1.5], ["×2", 2]].map(([l, k]) => `<button data-mult="${k}" data-i="${idx}">${l}</button>`).join("")}
+    ${canSetPack(it) ? `<button class="set-pack" data-set-pack="${idx}">Это вся упаковка</button>` : ""}</div>`;
+}
 
 function itemHtml(it, idx) {
   const k = (Number(it.grams) || 0) / 100;
@@ -1313,7 +1329,7 @@ function itemHtml(it, idx) {
       </div>
       <div class="small" data-item-total="${idx}">${itemTotals(it)}</div>
     </div>
-    <div class="mult">${[["½", 0.5], ["×1,5", 1.5], ["×2", 2]].map(([l, k]) => `<button data-mult="${k}" data-i="${idx}">${l}</button>`).join("")}</div>
+    ${multHtml(it, idx)}
     ${opts ? `<select data-opt="${idx}">${opts}</select>` : ""}
   </div>`;
 }
@@ -1366,6 +1382,8 @@ function setGrams(idx, grams) {
   const input = sheetBody.querySelector(`[data-grams="${idx}"]`);
   if (input && Number(input.value) !== items[idx].grams) input.value = r0(items[idx].grams);
   sheetBody.querySelector(`[data-item-total="${idx}"]`).innerHTML = itemTotals(items[idx]);
+  const packs = sheetBody.querySelector(`[data-pack-count="${idx}"]`);
+  if (packs) packs.textContent = packLabel(items[idx]);
   if (draft) updateDraftTotals(); else updateDishResult();
   stashDraft();
 }
@@ -1390,7 +1408,7 @@ sheetBody.addEventListener("change", (e) => {
   const o = it.options[Number(e.target.value)];
   // Same rule as the server's: a database value wins, else the model's estimate stays.
   const est = it.options.find((x) => x.source === "estimate");
-  Object.assign(it, { food_id: o.food_id, source: o.source, kcal_100: o.kcal_100, protein_100: o.protein_100, fat_100: o.fat_100, carbs_100: o.carbs_100,
+  Object.assign(it, { package_grams: o.package_grams || it.package_grams || null, food_id: o.food_id, source: o.source, kcal_100: o.kcal_100, protein_100: o.protein_100, fat_100: o.fat_100, carbs_100: o.carbs_100,
     ...Object.fromEntries(EXTRA_KEYS.map((k) => [k, o[k] ?? est?.[k] ?? null])) });
   rerender();
 });
@@ -1430,6 +1448,20 @@ sheetBody.addEventListener("click", async (e) => {
   } else if (t.dataset.step) {
     const idx = Number(t.dataset.i);
     setGrams(idx, (Number(editing().items[idx].grams) || 0) + Number(t.dataset.step));
+  } else if (t.dataset.pack) {
+    const idx = Number(t.dataset.i);
+    setGrams(idx, Math.round(editing().items[idx].package_grams * Number(t.dataset.pack)));
+  } else if (t.dataset.setPack !== undefined) {
+    const it = editing().items[Number(t.dataset.setPack)];
+    const grams = Number(it.grams) || 0;
+    if (grams < 1) return;
+    t.disabled = true;
+    try {
+      await api(`/api/foods/${it.food_id}/package`, { method: "PUT", json: { grams } });
+      it.package_grams = grams;
+      stashDraft();
+      rerender();
+    } catch (err) { t.disabled = false; toast(err.message); }
   } else if (t.dataset.del !== undefined) {
     editing().items.splice(Number(t.dataset.del), 1);
     rerender();
@@ -1488,6 +1520,7 @@ function openCustomFood(name, barcode = null, note = "") {
       <div class="grow"><label>Белки</label><input name="protein_100" type="text" inputmode="decimal" autocomplete="off" required></div></div>
       <div class="row"><div class="grow"><label>Жиры</label><input name="fat_100" type="text" inputmode="decimal" autocomplete="off" required></div>
       <div class="grow"><label>Углеводы</label><input name="carbs_100" type="text" inputmode="decimal" autocomplete="off" required></div></div>
+      <label>Вес упаковки, г или мл</label><input name="package_grams" type="text" inputmode="decimal" autocomplete="off" placeholder="Необязательно: банка 500, батончик 50">
       <details class="describe cf-more">
         <summary>Ещё: клетчатка, сахар, соль</summary>
         <div class="row"><div class="grow"><label>Клетчатка</label><input name="fiber_100" type="text" inputmode="decimal" autocomplete="off"></div>
@@ -1508,10 +1541,10 @@ function openCustomFood(name, barcode = null, note = "") {
       const opt = (v) => (String(v ?? "").trim() === "" ? null : num(v));
       const food = await api("/api/foods", { method: "POST", json: {
         name: f.name, kcal_100: num(f.kcal_100), protein_100: num(f.protein_100), fat_100: num(f.fat_100), carbs_100: num(f.carbs_100),
-        fiber_100: opt(f.fiber_100), sugar_100: opt(f.sugar_100), salt_100: opt(f.salt_100), barcode } });
-      if (back) { draft = back; draft.items.push({ ...food, grams: 100, options: [food] }); renderEditor(); }
-      else if (backDish) { dish = backDish; dish.items.push({ ...food, grams: 100, options: [food] }); renderDish(); }
-      else openEditor({ title: food.name, items: [{ ...food, grams: 100, options: [food] }], comment: "" });
+        fiber_100: opt(f.fiber_100), sugar_100: opt(f.sugar_100), salt_100: opt(f.salt_100), package_grams: opt(f.package_grams), barcode } });
+      if (back) { draft = back; draft.items.push({ ...food, grams: startGrams(food), options: [food] }); renderEditor(); }
+      else if (backDish) { dish = backDish; dish.items.push({ ...food, grams: startGrams(food), options: [food] }); renderDish(); }
+      else openEditor({ title: food.name, items: [{ ...food, grams: startGrams(food), options: [food] }], comment: "" });
     } catch (err) { toast(err.message); }
   };
 }
@@ -1927,7 +1960,7 @@ async function findBarcode(raw) {
   sheetBody.innerHTML = '<div class="spinner"></div><p class="center muted">Ищу продукт…</p>';
   try {
     const food = await api(`/api/foods/barcode/${code}`);
-    openEditor({ title: food.name, items: [{ ...food, grams: 100, options: [food] }], comment: "Проверь вес порции — по умолчанию 100 г." });
+    openEditor({ title: food.name, items: [{ ...food, grams: startGrams(food), options: [food] }], comment: food.package_grams || food.last_grams ? "" : "Проверь вес порции — по умолчанию 100 г." });
   } catch (err) {
     if (err.status === 401) { closeSheet(); return renderAuth(); }
     const note = err.status === 404
